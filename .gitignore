@@ -6,3 +6,4 @@ build/
 *.a
 *.dSYM/
 compile_commands.json
+.DS_Store

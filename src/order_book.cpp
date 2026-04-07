@@ -4,7 +4,7 @@
 
 namespace tradematch {
 
-std::string OrderBook::validate(const OrderRequest& order) const {
+std::string OrderBook::validate_request(const OrderRequest& order, OrderId ignored_order_id) const {
     if (order.order_id == 0U) {
         return "Order ID must be greater than zero.";
     }
@@ -21,7 +21,12 @@ std::string OrderBook::validate(const OrderRequest& order) const {
         return "Limit order price must be greater than zero.";
     }
 
-    if (order_index_.find(order.order_id) != order_index_.end()) {
+    if (order.type == OrderType::Market && order.price != 0) {
+        return "Market order price must be zero.";
+    }
+
+    const auto active_order_it = order_index_.find(order.order_id);
+    if (active_order_it != order_index_.end() && order.order_id != ignored_order_id) {
         return "Order ID is already active in the book.";
     }
 
@@ -33,7 +38,7 @@ SubmitResult OrderBook::submit(const OrderRequest& order) {
     result.order_id = order.order_id;
     result.remaining_quantity = order.quantity;
 
-    const auto validation_error = validate(order);
+    const auto validation_error = validate_request(order);
     if (!validation_error.empty()) {
         result.message = validation_error;
         return result;
@@ -114,6 +119,45 @@ CancelResult OrderBook::cancel(OrderId order_id) {
         if (level_it != asks_.end() && level_it->second.empty()) {
             asks_.erase(level_it);
         }
+    }
+
+    return result;
+}
+
+ReplaceResult OrderBook::replace(const OrderRequest& replacement) {
+    ReplaceResult result;
+    result.order_id = replacement.order_id;
+
+    const auto existing_order_it = order_index_.find(replacement.order_id);
+    if (existing_order_it == order_index_.end()) {
+        result.message = "Order not found.";
+        return result;
+    }
+
+    const auto validation_error = validate_request(replacement, replacement.order_id);
+    if (!validation_error.empty()) {
+        result.message = validation_error;
+        return result;
+    }
+
+    result.previous_remaining_quantity = existing_order_it->second.iterator->remaining_quantity;
+
+    // Replace is modeled as validate -> cancel -> resubmit, which intentionally resets time priority.
+    cancel(replacement.order_id);
+    result.submit_result = submit(replacement);
+    result.replaced = result.submit_result.accepted;
+
+    if (!result.replaced) {
+        result.message = "Order replacement failed.";
+        return result;
+    }
+
+    if (result.submit_result.expired) {
+        result.message = "Order replaced and the new market order expired after matching available liquidity.";
+    } else if (result.submit_result.rested) {
+        result.message = "Order replaced and re-entered the book with a new priority timestamp.";
+    } else {
+        result.message = "Order replaced and fully filled immediately.";
     }
 
     return result;

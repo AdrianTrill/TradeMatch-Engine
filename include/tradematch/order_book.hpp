@@ -16,6 +16,7 @@ class OrderBook {
 public:
     SubmitResult submit(const OrderRequest& order);
     CancelResult cancel(OrderId order_id);
+    ReplaceResult replace(const OrderRequest& replacement);
 
     bool has_order(OrderId order_id) const;
     std::optional<RestingOrderView> get_order(OrderId order_id) const;
@@ -52,7 +53,7 @@ private:
         SequenceNumber sequence{};
     };
 
-    std::string validate(const OrderRequest& order) const;
+    std::string validate_request(const OrderRequest& order, OrderId ignored_order_id = 0U) const;
     void match_buy_order(WorkingOrder& incoming, SubmitResult& result);
     void match_sell_order(WorkingOrder& incoming, SubmitResult& result);
     void rest_order(const WorkingOrder& order);

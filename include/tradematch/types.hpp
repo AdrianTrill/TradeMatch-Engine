@@ -59,6 +59,14 @@ struct CancelResult {
     std::string message;
 };
 
+struct ReplaceResult {
+    OrderId order_id{};
+    bool replaced{false};
+    Quantity previous_remaining_quantity{};
+    SubmitResult submit_result;
+    std::string message;
+};
+
 struct RestingOrderView {
     OrderId order_id{};
     Side side{Side::Buy};

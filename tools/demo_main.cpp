@@ -11,6 +11,7 @@ using tradematch::OrderBook;
 using tradematch::OrderRequest;
 using tradematch::OrderType;
 using tradematch::PriceLevelView;
+using tradematch::ReplaceResult;
 using tradematch::Side;
 using tradematch::SubmitResult;
 
@@ -63,6 +64,18 @@ void print_cancel_result(const CancelResult& result) {
     std::cout << "  " << result.message << '\n';
 }
 
+void print_replace_result(const ReplaceResult& result) {
+    std::cout << "Replace order " << result.order_id << '\n';
+    std::cout << "  replaced=" << (result.replaced ? "true" : "false")
+              << " previous_remaining=" << result.previous_remaining_quantity
+              << '\n';
+    std::cout << "  " << result.message << '\n';
+
+    if (result.replaced) {
+        print_submit_result(result.submit_result);
+    }
+}
+
 void submit_and_print(OrderBook& book, const OrderRequest& order) {
     std::cout << "Submit order " << order.order_id
               << " side=" << tradematch::to_string(order.side)
@@ -80,6 +93,23 @@ void submit_and_print(OrderBook& book, const OrderRequest& order) {
     std::cout << '\n';
 }
 
+void replace_and_print(OrderBook& book, const OrderRequest& order) {
+    std::cout << "Replace request " << order.order_id
+              << " side=" << tradematch::to_string(order.side)
+              << " type=" << tradematch::to_string(order.type)
+              << " qty=" << order.quantity;
+
+    if (order.type == OrderType::Limit) {
+        std::cout << " price=" << tradematch::format_price(order.price);
+    }
+    std::cout << '\n';
+
+    const auto result = book.replace(order);
+    print_replace_result(result);
+    print_snapshot(book.snapshot());
+    std::cout << '\n';
+}
+
 }  // namespace
 
 int main() {
@@ -87,6 +117,7 @@ int main() {
 
     submit_and_print(book, OrderRequest{1, Side::Buy, OrderType::Limit, 100, 10050});
     submit_and_print(book, OrderRequest{2, Side::Buy, OrderType::Limit, 60, 10050});
+    replace_and_print(book, OrderRequest{1, Side::Buy, OrderType::Limit, 80, 10050});
     submit_and_print(book, OrderRequest{3, Side::Sell, OrderType::Limit, 120, 10050});
     submit_and_print(book, OrderRequest{4, Side::Sell, OrderType::Limit, 50, 10100});
     submit_and_print(book, OrderRequest{5, Side::Buy, OrderType::Market, 40, 0});

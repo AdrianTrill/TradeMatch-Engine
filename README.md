@@ -21,8 +21,31 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Price-time priority
 - Trade execution reporting
 - Cancel by order ID
+- Replace by order ID
 - Resting-order lookup by order ID
 - Deterministic benchmark/demo scenarios
+
+## API Overview
+
+Core public API:
+
+- `submit(OrderRequest)` submits a new order and returns fills, remaining quantity, and any generated trades.
+- `cancel(OrderId)` removes a resting order by ID and reports the cancelled quantity.
+- `replace(OrderRequest)` validates, cancels, and resubmits an active order using the same ID.
+- `get_order(OrderId)` returns the current resting state for an active order.
+- `get_orders_at_level(Side, Price)` exposes FIFO order state for a price level.
+- `snapshot()` returns visible bid/ask levels for inspection and tests.
+
+Minimal usage:
+
+```cpp
+tradematch::OrderBook book;
+
+auto add = book.submit({1, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10050});
+auto replace = book.replace({1, tradematch::Side::Buy, tradematch::OrderType::Limit, 80, 10075});
+auto cancel = book.cancel(1);
+auto snapshot = book.snapshot();
+```
 
 ## Matching Rules
 
@@ -34,10 +57,19 @@ The engine follows standard price-time priority:
 - Trades execute at the resting order's price.
 - Market orders consume available liquidity and never rest in the book.
 - Unfilled market quantity expires immediately.
+- Replace is implemented as cancel plus resubmit, so the replaced order loses its original time priority.
 
 ## System Design
 
 The matching core is intentionally single-threaded. That keeps sequencing deterministic and makes the behavior straightforward to test. Concurrency can be layered around the engine later, but the matching path itself should stay simple and predictable.
+
+### Request Flow
+
+1. Validate the incoming request.
+2. Match against the best opposing price levels.
+3. Emit trade records for each execution.
+4. Either rest the remaining quantity, expire it, or remove it on cancel.
+5. Expose the resulting state through lookup and snapshot methods.
 
 ### Core Data Structures
 
@@ -58,10 +90,17 @@ This yields:
 - clear time priority within a level
 - efficient cancel without scanning the whole book
 
+### Design Tradeoffs
+
+- The engine is single-threaded by design. That keeps sequencing deterministic and makes correctness easier to inspect, but it is not a full multi-producer exchange gateway.
+- `std::map` plus `std::list` is not the most cache-optimized possible layout, but it gives very clear price ordering, stable iterators for cancel, and compact code.
+- Replace is intentionally modeled as validate, cancel, and resubmit. That keeps the implementation simple and makes the priority reset explicit instead of hiding it.
+
 ## Repository Layout
 
 ```text
 .
+├── .github/workflows/ci.yml
 ├── CMakeLists.txt
 ├── Makefile
 ├── include/tradematch/
@@ -129,18 +168,45 @@ ctest --test-dir build --output-on-failure
 The demo executable walks through a simple deterministic scenario:
 
 1. Two buy limit orders rest at the same price.
-2. A sell limit order matches them in FIFO order.
-3. A sell limit order rests on the ask side.
-4. A buy market order consumes part of that liquidity.
-5. The remaining ask is cancelled by order ID.
+2. One order is replaced with the same price but a new quantity, which resets its time priority.
+3. A sell limit order matches the two bids in FIFO order after the replace.
+4. A sell limit order rests on the ask side.
+5. A buy market order consumes part of that liquidity.
+6. The remaining ask is cancelled by order ID.
 
 The output shows:
 
 - whether the order was accepted
+- whether a replace succeeded and how much quantity it replaced
 - how much filled
 - whether any remainder rested or expired
 - generated trades with buy/sell IDs, price, quantity, and aggressor side
 - a book snapshot after each step
+
+Sample demo requests:
+
+```text
+BUY  LIMIT  id=1 qty=100 price=100.50
+BUY  LIMIT  id=2 qty=60  price=100.50
+REPLACE     id=1 qty=80  price=100.50
+SELL LIMIT  id=3 qty=120 price=100.50
+SELL LIMIT  id=4 qty=50  price=101.00
+BUY  MARKET id=5 qty=40
+CANCEL      id=4
+```
+
+Sample output excerpt:
+
+```text
+Replace order 1
+  replaced=true previous_remaining=100
+  Order replaced and re-entered the book with a new priority timestamp.
+  accepted=true filled=0 remaining=80 rested=true expired=false
+
+Submit order 3 side=SELL type=LIMIT qty=120 price=100.50
+  trade#1 buy=2 sell=3 qty=60 price=100.50 aggressor=SELL
+  trade#2 buy=1 sell=3 qty=60 price=100.50 aggressor=SELL
+```
 
 ## Tests Included
 
@@ -151,9 +217,11 @@ The test suite covers deterministic scenarios that matter for correctness:
 - multiple matches across price levels
 - price-time priority at the same price
 - cancel order
+- replace order priority reset
 - unmatched order resting in the book
 - market-order expiry of any unfilled remainder
 - invalid and duplicate-order rejection
+- invariant checks after every submit, cancel, and replace
 
 ## Why This Project Matters
 
@@ -163,7 +231,6 @@ It is also a strong stepping stone for deeper systems work: market data fan-out,
 
 ## Future Improvements
 
-- Modify/replace order support
 - IOC/FOK and post-only order policies
 - Snapshot serialization and replayable input streams
 - Latency histograms and richer benchmark reporting
