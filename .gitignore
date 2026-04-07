@@ -1,0 +1,8 @@
+build/
+*.o
+*.obj
+*.out
+*.exe
+*.a
+*.dSYM/
+compile_commands.json

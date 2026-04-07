@@ -1,93 +1,170 @@
 # TradeMatch Engine
 
-## Overview
-This project implements a **high-performance Order Matching Engine (OME)** designed for **low-latency** execution of limit and market orders. It efficiently handles **high-frequency trading (HFT) scenarios** using advanced data structures and multithreading techniques.
+TradeMatch Engine is a compact C++ order matching engine built to demonstrate the core mechanics behind a price-time-priority exchange book. The project focuses on the matching loop itself: deterministic order handling, clean data structures, strong tests, and a repository layout that is easy to inspect.
 
-## Features
-✅ **Efficient Order Matching:** Uses max-heaps (buy orders) and min-heaps (sell orders) for optimal execution.  
-✅ **Multithreading Support:** Processes orders in parallel for faster performance.  
-✅ **Low-Latency Design:** Optimized with **lock-free data structures, cache-friendly algorithms, and SIMD acceleration**.  
-✅ **Real-Time Order Simulation:** Continuously generates buy/sell orders to simulate market activity.  
-✅ **Performance Benchmarking:** Includes latency measurement tools to evaluate execution speed.  
+Prices are represented as integer ticks rather than floating-point values. In the demo and tests, one tick equals one cent.
 
-## How I Built It
-The development of the **High-Performance Order Matching Engine** followed a structured approach:
+## Why It Is Interesting
 
-1. **Project Initialization:**
-   - Designed a modular architecture using **C++17**, ensuring scalability and performance.
-   - Set up a **CMake build system** for easy compilation and testing.
+This is the kind of systems problem that rewards precision more than size. A matching engine needs predictable behavior, strict sequencing rules, efficient cancellation, and a design that is easy to reason about under load. Even in a compact codebase, it exercises the same skills that matter in backend and low-latency systems work:
 
-2. **Order Book Implementation:**
-   - Developed an efficient **priority queue-based order book** using **max-heaps** (for buy orders) and **min-heaps** (for sell orders).
-   - Implemented an **unordered map** for O(1) lookup, modification, and deletion of orders.
+- data structure selection under performance constraints
+- deterministic state transitions
+- correctness-first handling of edge cases
+- clear interfaces for testing, extensions, and instrumentation
 
-3. **Order Matching Algorithm:**
-   - Designed a **matching engine** that continuously processes buy/sell orders with FIFO priority at the same price.
-   - Implemented **multithreading** to allow parallel order processing and execution.
+## Supported Behavior
 
-4. **Performance Optimization:**
-   - Used **lock-free data structures** where applicable to minimize contention.
-   - Applied **cache-friendly algorithms** to improve speed.
-   - Integrated **benchmarking tools** to analyze execution latency in real-time.
+- Limit orders
+- Market orders
+- Partial fills
+- Price-time priority
+- Trade execution reporting
+- Cancel by order ID
+- Resting-order lookup by order ID
+- Deterministic benchmark/demo scenarios
 
-5. **Real-Time Order Simulation:**
-   - Created an **order generator** that simulates high-frequency trading (HFT) environments.
-   - Ensured the system can handle dynamic order book updates efficiently.
+## Matching Rules
 
-6. **Testing & Debugging:**
-   - Implemented rigorous **unit testing** for order insertion, deletion, and matching logic.
-   - Debugged concurrency issues and ensured thread safety for multi-threaded execution.
+The engine follows standard price-time priority:
 
-7. **Final Deployment & Documentation:**
-   - Packaged the project for deployment with a clean and structured **GitHub repository**.
-   - Created this **README** to guide users through installation, usage, and future enhancements.
+- Buy orders match the lowest available ask first.
+- Sell orders match the highest available bid first.
+- At the same price level, older resting orders fill before newer ones.
+- Trades execute at the resting order's price.
+- Market orders consume available liquidity and never rest in the book.
+- Unfilled market quantity expires immediately.
 
-## Technologies Used
-- **C++17** for high-performance computing.
-- **Multithreading** for concurrent order processing.
-- **Priority Queues (Heaps)** for order book management.
-- **Lock-Free Hash Maps** for ultra-fast order lookup.
-- **ZeroMQ** (planned) for real-time exchange simulation.
+## System Design
 
-## Build & Run Instructions
-### Prerequisites
-Ensure you have the following installed:
-- **GCC/G++ (C++17 or later)**
-- **Make (for build automation)**
-- **Linux/macOS/Windows (with MinGW or WSL)**
+The matching core is intentionally single-threaded. That keeps sequencing deterministic and makes the behavior straightforward to test. Concurrency can be layered around the engine later, but the matching path itself should stay simple and predictable.
 
-### Compilation Steps
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/High-Performance-Order-Matching-Engine.git
-   cd High-Performance-Order-Matching-Engine
-   ```
-2. Compile the project using Makefile:
-   ```bash
-   make
-   ```
-   This will generate the executable `order_matching`.
+### Core Data Structures
 
-### Running the Order Matching Engine
-After compilation, run the matching engine:
-```bash
-./order_matching
+- `std::map<Price, std::list<RestingOrder>, std::greater<>>` for bids
+- `std::map<Price, std::list<RestingOrder>, std::less<>>` for asks
+- `std::unordered_map<OrderId, OrderLocator>` for active-order lookup and cancel
+
+Why this layout:
+
+- integer price ticks avoid floating-point comparison issues in matching logic
+- `std::map` keeps best bid / best ask at the front in sorted order.
+- `std::list` preserves FIFO within a price level and gives stable iterators.
+- `std::unordered_map` gives direct access to the resting order for cancellation.
+
+This yields:
+
+- clear price priority across levels
+- clear time priority within a level
+- efficient cancel without scanning the whole book
+
+## Repository Layout
+
+```text
+.
+├── CMakeLists.txt
+├── Makefile
+├── include/tradematch/
+│   ├── order_book.hpp
+│   └── types.hpp
+├── src/
+│   ├── formatting.cpp
+│   └── order_book.cpp
+├── tests/
+│   └── order_book_tests.cpp
+└── tools/
+    ├── benchmark_main.cpp
+    └── demo_main.cpp
 ```
-This will continuously generate and match orders in real-time.
 
-### Running Benchmarks
-To measure system latency, use the built-in benchmarking tool:
+## Build
+
+Requirements:
+
+- A C++17 compiler
+- Optional: CMake 3.16+ if you want the CMake workflow
+
+Fastest path:
+
 ```bash
-./benchmarks/latency_test
+make
 ```
-This will output execution time in nanoseconds.
 
-## Future Enhancements
-- 🚀 **Integration with WebSockets for real-time market data.**
-- 🧠 **AI-based order execution optimization.**
-- ⚡ **FPGA acceleration for ultra-low-latency trading.**
-- 📈 **FIX protocol support for real-world trading.**
+CMake alternative:
 
-## Contributing
-Feel free to contribute by submitting issues or pull requests. Let’s build the fastest OME together! 🚀
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
 
+## Run
+
+Demo:
+
+```bash
+./build/tradematch_demo
+```
+
+Benchmark:
+
+```bash
+./build/tradematch_benchmark
+./build/tradematch_benchmark 500000
+```
+
+Tests:
+
+```bash
+make test
+```
+
+If you build with CMake instead:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+## Example Workflow
+
+The demo executable walks through a simple deterministic scenario:
+
+1. Two buy limit orders rest at the same price.
+2. A sell limit order matches them in FIFO order.
+3. A sell limit order rests on the ask side.
+4. A buy market order consumes part of that liquidity.
+5. The remaining ask is cancelled by order ID.
+
+The output shows:
+
+- whether the order was accepted
+- how much filled
+- whether any remainder rested or expired
+- generated trades with buy/sell IDs, price, quantity, and aggressor side
+- a book snapshot after each step
+
+## Tests Included
+
+The test suite covers deterministic scenarios that matter for correctness:
+
+- exact match
+- partial fill with resting remainder
+- multiple matches across price levels
+- price-time priority at the same price
+- cancel order
+- unmatched order resting in the book
+- market-order expiry of any unfilled remainder
+- invalid and duplicate-order rejection
+
+## Why This Project Matters
+
+For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It shows the ability to take a compact but failure-prone codebase and turn it into a cleaner, testable engine with explicit trade-offs, measurable behavior, and documentation that matches reality.
+
+It is also a strong stepping stone for deeper systems work: market data fan-out, persistence, order modification, IOC/FOK handling, or a lock-aware ingress layer around the matching core.
+
+## Future Improvements
+
+- Modify/replace order support
+- IOC/FOK and post-only order policies
+- Snapshot serialization and replayable input streams
+- Latency histograms and richer benchmark reporting
+- Market data feed generation from execution events
