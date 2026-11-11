@@ -19,7 +19,7 @@ struct LiveOrder {
 class LiveOrderSet {
 public:
     void insert(OrderId order_id, Side side) {
-        if (positions_.find(order_id) != positions_.end()) {
+        if (positions_.contains(order_id)) {
             return;
         }
         positions_.emplace(order_id, orders_.size());

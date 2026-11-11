@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(TradeMatchEngine VERSION 1.0.0 LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -54,7 +54,7 @@ target_link_libraries(tradematch_engine PRIVATE tradematch_project_options)
 add_executable(tradematch_demo tools/demo_main.cpp)
 target_link_libraries(tradematch_demo PRIVATE tradematch_engine tradematch_project_options)
 
-add_library(tradematch_bench_support STATIC bench/workload.cpp)
+add_library(tradematch_bench_support STATIC bench/workload.cpp bench/baseline/map_order_book.cpp)
 target_include_directories(tradematch_bench_support PUBLIC ${PROJECT_SOURCE_DIR}/bench)
 target_link_libraries(tradematch_bench_support PUBLIC tradematch_engine PRIVATE tradematch_project_options)
 
@@ -67,6 +67,10 @@ if(BUILD_TESTING)
     add_executable(tradematch_tests tests/order_book_tests.cpp)
     target_link_libraries(tradematch_tests PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_tests COMMAND tradematch_tests)
+
+    add_executable(tradematch_order_index_tests tests/order_index_tests.cpp)
+    target_link_libraries(tradematch_order_index_tests PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_order_index_tests COMMAND tradematch_order_index_tests)
 
     add_executable(tradematch_differential_tests tests/differential_tests.cpp)
     target_include_directories(tradematch_differential_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
@@ -82,6 +86,14 @@ if(BUILD_TESTING)
     add_executable(tradematch_bench_tests tests/bench_tests.cpp)
     target_link_libraries(tradematch_bench_tests PRIVATE tradematch_bench_support tradematch_project_options)
     add_test(NAME tradematch_bench_tests COMMAND tradematch_bench_tests)
+
+    # Replaces global operator new to prove the request path never allocates. Sanitizers install their own
+    # allocator hooks, so the check only runs in plain builds.
+    if(NOT TRADEMATCH_SANITIZERS)
+        add_executable(tradematch_allocation_tests tests/allocation_tests.cpp)
+        target_link_libraries(tradematch_allocation_tests PRIVATE tradematch_bench_support tradematch_project_options)
+        add_test(NAME tradematch_allocation_tests COMMAND tradematch_allocation_tests)
+    endif()
 
     add_test(NAME tradematch_benchmark_smoke
              COMMAND tradematch_benchmark --ops 20000 --warmup 2000 --prefill 1000 --no-distribution)

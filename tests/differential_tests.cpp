@@ -13,6 +13,8 @@ using tradematch::testing::DifferentialHarness;
 using tradematch::testing::Operation;
 using tradematch::testing::OperationGenerator;
 
+constexpr tradematch::BookCapacity kTinyCapacity{1, 1, 1};
+
 struct Options {
     std::uint64_t first_seed{1};
     std::uint64_t seeds{200};
@@ -58,7 +60,9 @@ int run(int argc, char** argv) {
 
     DifferentialHarness::Stats totals;
     for (std::uint64_t seed = options.first_seed; seed < options.first_seed + options.seeds; ++seed) {
-        DifferentialHarness harness;
+        // Odd seeds start the engine with room for one order, one level, and one trade, so every pool and the hash
+        // index grow repeatedly while being checked against the reference.
+        DifferentialHarness harness(seed % 2 == 1 ? kTinyCapacity : tradematch::BookCapacity{});
         OperationGenerator generator(seed);
         std::deque<Operation> history;
 

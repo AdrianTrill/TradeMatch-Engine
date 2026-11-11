@@ -52,6 +52,9 @@ inline std::string describe(const Operation& op) {
 // observable difference: a result field, a trade, the visible book, or an order lookup.
 class DifferentialHarness {
 public:
+    DifferentialHarness() = default;
+    explicit DifferentialHarness(const BookCapacity& capacity) : engine_(capacity) {}
+
     struct Stats {
         std::size_t operations{0};
         std::size_t trades{0};
@@ -130,13 +133,20 @@ private:
         return {};
     }
 
+    static std::string compare_reason(const char* what, RejectReason engine, RejectReason reference) {
+        if (engine == reference) {
+            return {};
+        }
+        return std::string(what) + ".reject_reason: engine=" + to_string(engine) + " reference=" + to_string(reference);
+    }
+
     static std::string compare_submit(const SubmitResult& engine, const SubmitResult& reference, const char* what) {
         const auto prefix = std::string(what) + ".";
         if (engine.accepted != reference.accepted) {
             return field((prefix + "accepted").c_str(), engine.accepted, reference.accepted);
         }
         if (!engine.accepted) {
-            return {};
+            return compare_reason(what, engine.reject_reason, reference.reject_reason);
         }
         if (engine.rested != reference.rested) {
             return field((prefix + "rested").c_str(), engine.rested, reference.rested);
@@ -166,6 +176,9 @@ private:
         if (engine.cancelled != reference.cancelled) {
             return field("cancel.cancelled", engine.cancelled, reference.cancelled);
         }
+        if (!engine.cancelled) {
+            return compare_reason("cancel", engine.reject_reason, reference.reject_reason);
+        }
         if (engine.cancelled_quantity != reference.cancelled_quantity) {
             return field("cancel.quantity", engine.cancelled_quantity, reference.cancelled_quantity);
         }
@@ -177,7 +190,7 @@ private:
             return field("replace.replaced", engine.replaced, reference.replaced);
         }
         if (!engine.replaced) {
-            return {};
+            return compare_reason("replace", engine.reject_reason, reference.reject_reason);
         }
         if (engine.previous_remaining_quantity != reference.previous_remaining_quantity) {
             return field("replace.previous_remaining",

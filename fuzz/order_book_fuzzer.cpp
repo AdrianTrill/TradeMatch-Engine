@@ -7,7 +7,7 @@
 #include <cstdlib>
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
-    tradematch::testing::DifferentialHarness harness;
+    tradematch::testing::DifferentialHarness harness(tradematch::BookCapacity{1, 1, 1});
     tradematch::testing::ByteDecoder decoder(data, size);
 
     while (!decoder.done()) {

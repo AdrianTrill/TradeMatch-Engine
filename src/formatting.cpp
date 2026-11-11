@@ -27,6 +27,29 @@ const char* to_string(OrderType type) noexcept {
     return "UNKNOWN";
 }
 
+const char* to_string(RejectReason reason) noexcept {
+    switch (reason) {
+        case RejectReason::None:
+            return "NONE";
+        case RejectReason::InvalidOrderId:
+            return "INVALID_ORDER_ID";
+        case RejectReason::InvalidQuantity:
+            return "INVALID_QUANTITY";
+        case RejectReason::InvalidPrice:
+            return "INVALID_PRICE";
+        case RejectReason::DuplicateOrderId:
+            return "DUPLICATE_ORDER_ID";
+        case RejectReason::UnknownOrder:
+            return "UNKNOWN_ORDER";
+        case RejectReason::SideChange:
+            return "SIDE_CHANGE";
+        case RejectReason::TypeChange:
+            return "TYPE_CHANGE";
+    }
+
+    return "UNKNOWN";
+}
+
 std::string format_price(Price price) {
     const bool negative = price < 0;
     // Negate in unsigned arithmetic so the most negative price does not overflow.

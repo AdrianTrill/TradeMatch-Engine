@@ -3,7 +3,7 @@
 
 #include <string>
 
-#if defined(__APPLE__)
+#ifdef __APPLE__
 #include <sys/sysctl.h>
 
 #include <array>
@@ -14,7 +14,7 @@
 namespace tradematch::bench {
 
 inline std::string cpu_name() {
-#if defined(__APPLE__)
+#ifdef __APPLE__
     std::array<char, 256> buffer{};
     std::size_t size = buffer.size();
     if (sysctlbyname("machdep.cpu.brand_string", buffer.data(), &size, nullptr, 0) == 0) {
@@ -24,7 +24,7 @@ inline std::string cpu_name() {
     std::ifstream cpuinfo("/proc/cpuinfo");
     std::string line;
     while (std::getline(cpuinfo, line)) {
-        if (line.rfind("model name", 0) == 0) {
+        if (line.starts_with("model name")) {
             const auto colon = line.find(':');
             if (colon != std::string::npos && colon + 2 <= line.size()) {
                 return line.substr(colon + 2);

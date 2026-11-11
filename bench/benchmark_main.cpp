@@ -2,6 +2,7 @@
 #include "system_info.hpp"
 #include "workload.hpp"
 
+#include "baseline/map_order_book.hpp"
 #include "tradematch/order_book.hpp"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <exception>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -34,11 +36,13 @@ using tradematch::bench::Workload;
 using tradematch::bench::WorkloadConfig;
 using Clock = std::chrono::steady_clock;
 
-constexpr std::string_view kEngineName = "v1: std::map price levels + std::list FIFO queues";
+constexpr std::string_view kV1Name = "v1 baseline: std::map levels + std::list queues + std::unordered_map index";
+constexpr std::string_view kV2Name = "v2: pooled intrusive FIFO lists + sorted price ladders + flat hash index";
 
 struct Options {
     WorkloadConfig workload;
     std::string json_path;
+    std::string engine{"both"};
     bool show_distribution{true};
 };
 
@@ -73,7 +77,7 @@ std::uint64_t parse_number(std::string_view flag, const std::string& value) {
 
 void print_usage() {
     std::cout << "usage: tradematch_benchmark [measured_ops] [--ops N] [--warmup N] [--prefill N] [--seed S]\n"
-                 "                            [--json FILE] [--no-distribution]\n";
+                 "                            [--engine v1|v2|both] [--json FILE] [--no-distribution]\n";
 }
 
 // Returns false when the program should exit immediately (after --help).
@@ -89,7 +93,7 @@ bool parse_options(int argc, char** argv, Options& options) {
             options.show_distribution = false;
             continue;
         }
-        if (arg.rfind("--", 0) != 0) {
+        if (!arg.starts_with("--")) {
             options.workload.measured_commands = parse_number("measured_ops", arg);
             continue;
         }
@@ -107,6 +111,11 @@ bool parse_options(int argc, char** argv, Options& options) {
             options.workload.seed = parse_number(arg, value);
         } else if (arg == "--json") {
             options.json_path = value;
+        } else if (arg == "--engine") {
+            if (value != "v1" && value != "v2" && value != "both") {
+                throw std::invalid_argument("--engine must be v1, v2, or both");
+            }
+            options.engine = value;
         } else {
             throw std::invalid_argument("unknown option " + arg);
         }
@@ -156,13 +165,16 @@ std::size_t apply(Book& book, const Command& command) {
 }
 
 template <typename Book>
-std::unique_ptr<EngineReport> measure(const Workload& workload, std::string_view engine_name) {
+std::unique_ptr<EngineReport> measure(const Workload& workload,
+                                      std::string_view engine_name,
+                                      const std::function<std::unique_ptr<Book>()>& make_book) {
     auto report = std::make_unique<EngineReport>();
     report->engine = std::string{engine_name};
 
     {
         // Latency pass: every command is timed individually; prefill and warm-up samples are discarded.
-        Book book;
+        const auto book_owner = make_book();
+        Book& book = *book_owner;
         for (std::size_t index = 0; index < workload.commands.size(); ++index) {
             const auto& command = workload.commands[index];
             const auto start = Clock::now();
@@ -180,7 +192,8 @@ std::unique_ptr<EngineReport> measure(const Workload& workload, std::string_view
 
     {
         // Throughput pass: the same stream on a fresh book with no clock reads inside the measured segment.
-        Book book;
+        const auto book_owner = make_book();
+        Book& book = *book_owner;
         for (std::size_t index = 0; index < workload.measured_begin; ++index) {
             apply(book, workload.commands[index]);
         }
@@ -209,15 +222,27 @@ std::string with_commas(std::uint64_t value) {
     return digits;
 }
 
+std::uint64_t g_clock_resolution_ns = 0;
+
 std::string format_ns(std::uint64_t nanoseconds) {
     std::ostringstream out;
-    if (nanoseconds < 10'000) {
+    if (nanoseconds < g_clock_resolution_ns) {
+        out << '<' << g_clock_resolution_ns << " ns";
+    } else if (nanoseconds < 10'000) {
         out << with_commas(nanoseconds) << " ns";
     } else if (nanoseconds < 10'000'000) {
         out << std::fixed << std::setprecision(1) << static_cast<double>(nanoseconds) / 1e3 << " us";
     } else {
         out << std::fixed << std::setprecision(1) << static_cast<double>(nanoseconds) / 1e6 << " ms";
     }
+    return out.str();
+}
+
+// The mean averages many samples taken at random phases of the clock tick, so it stays accurate below the
+// clock resolution and is printed with a decimal instead of the "<resolution" marker.
+std::string format_mean(double nanoseconds) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1) << nanoseconds << " ns";
     return out.str();
 }
 
@@ -236,8 +261,7 @@ void print_latency_row(std::string_view name, const LatencyHistogram& histogram)
     for (const auto percentile : kPercentiles) {
         std::cout << std::setw(10) << format_ns(histogram.percentile(percentile));
     }
-    std::cout << std::setw(10) << format_ns(histogram.max()) << std::setw(10)
-              << format_ns(static_cast<std::uint64_t>(std::llround(histogram.mean()))) << '\n';
+    std::cout << std::setw(10) << format_ns(histogram.max()) << std::setw(10) << format_mean(histogram.mean()) << '\n';
 }
 
 void print_distribution(const LatencyHistogram& histogram) {
@@ -266,15 +290,11 @@ void print_distribution(const LatencyHistogram& histogram) {
     }
 }
 
-void print_report(const Options& options,
-                  const Workload& workload,
-                  const ClockProfile& clock,
-                  const EngineReport& report) {
+void print_header(const Options& options, const Workload& workload, const ClockProfile& clock) {
     const auto& config = options.workload;
     const auto measured = static_cast<double>(config.measured_commands);
 
     std::cout << "TradeMatch latency benchmark\n";
-    std::cout << "  engine     " << report.engine << '\n';
     std::cout << "  host       " << tradematch::bench::cpu_name() << " | " << tradematch::bench::compiler_name()
               << " | " << (tradematch::bench::optimized_build() ? "optimized build" : "UNOPTIMIZED build") << '\n';
     std::cout << "  workload   seed " << config.seed << " | " << with_commas(config.prefill_orders)
@@ -291,8 +311,11 @@ void print_report(const Options& options,
     if (!tradematch::bench::optimized_build()) {
         std::cout << "  WARNING    unoptimized build: numbers are not representative (use a Release build)\n";
     }
+}
 
-    std::cout << "\n  " << std::left << std::setw(9) << "operation" << std::right << std::setw(11) << "count";
+void print_engine(const Options& options, const EngineReport& report) {
+    std::cout << "\n  engine     " << report.engine << "\n\n";
+    std::cout << "  " << std::left << std::setw(9) << "operation" << std::right << std::setw(11) << "count";
     for (const auto label : kPercentileLabels) {
         std::cout << std::setw(10) << label;
     }
@@ -312,6 +335,49 @@ void print_report(const Options& options,
               << " orders resting at the end\n";
 }
 
+std::string ratio(double baseline, double improved) {
+    if (improved <= 0.0 || baseline <= 0.0) {
+        return "n/a";
+    }
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(1) << baseline / improved << 'x';
+    return out.str();
+}
+
+std::string latency_ratio(std::uint64_t baseline, std::uint64_t improved) {
+    // A percentile within one clock tick of zero has no precise magnitude, so no ratio is claimed for it.
+    if (improved < 2 * g_clock_resolution_ns) {
+        return "n/a";
+    }
+    return ratio(static_cast<double>(baseline), static_cast<double>(improved));
+}
+
+void print_comparison(const EngineReport& v1, const EngineReport& v2) {
+    const auto row =
+        [](std::string_view label, const std::string& before, const std::string& after, const std::string& gain) {
+            std::cout << "  " << std::left << std::setw(16) << label << std::right << std::setw(16) << before
+                      << std::setw(16) << after << std::setw(13) << gain << '\n';
+        };
+    const auto rate = [](double ops_per_second) {
+        std::ostringstream out;
+        out << std::fixed << std::setprecision(1) << ops_per_second / 1e6 << " M ops/s";
+        return out.str();
+    };
+
+    std::cout << "\n  v2 vs v1 on the identical stream\n";
+    row("", "v1 baseline", "v2", "improvement");
+    row("mean latency", format_mean(v1.all.mean()), format_mean(v2.all.mean()), ratio(v1.all.mean(), v2.all.mean()));
+    for (std::size_t index = 1; index < kPercentiles.size(); ++index) {
+        const auto before = v1.all.percentile(kPercentiles.at(index));
+        const auto after = v2.all.percentile(kPercentiles.at(index));
+        row(kPercentileLabels.at(index), format_ns(before), format_ns(after), latency_ratio(before, after));
+    }
+    row("throughput",
+        rate(v1.throughput_ops_per_second),
+        rate(v2.throughput_ops_per_second),
+        ratio(v2.throughput_ops_per_second, v1.throughput_ops_per_second));
+}
+
 std::string json_escape(std::string_view text) {
     std::string escaped;
     for (const char character : text) {
@@ -327,7 +393,7 @@ void write_histogram_json(std::ostream& out, const LatencyHistogram& histogram) 
     out << R"({"count": )" << histogram.count();
     for (std::size_t index = 0; index < kPercentiles.size(); ++index) {
         auto key = std::string{kPercentileLabels.at(index)};
-        std::replace(key.begin(), key.end(), '.', '_');
+        std::ranges::replace(key, '.', '_');
         out << R"(, ")" << key << R"(": )" << histogram.percentile(kPercentiles.at(index));
     }
     out << R"(, "max": )" << histogram.max() << R"(, "mean": )" << std::fixed << std::setprecision(2)
@@ -387,10 +453,31 @@ int run(int argc, char** argv) {
 
     const auto workload = tradematch::bench::generate_workload(options.workload);
     const auto clock = profile_clock();
+    g_clock_resolution_ns = clock.resolution_ns;
 
+    // Sized for the workload's peak so the v2 request path never needs to grow its pools during measurement.
+    tradematch::BookCapacity capacity;
+    capacity.orders = std::max<std::size_t>(options.workload.prefill_orders * 2, 4'096);
+    capacity.price_levels = 4'096;
+    capacity.trades_per_call = 1'024;
+
+    print_header(options, workload, clock);
     std::vector<std::unique_ptr<EngineReport>> reports;
-    reports.push_back(measure<tradematch::OrderBook>(workload, kEngineName));
-    print_report(options, workload, clock, *reports.front());
+    if (options.engine != "v2") {
+        reports.push_back(measure<tradematch::baseline::MapOrderBook>(workload, kV1Name, [] {
+            return std::make_unique<tradematch::baseline::MapOrderBook>();
+        }));
+        print_engine(options, *reports.back());
+    }
+    if (options.engine != "v1") {
+        reports.push_back(measure<tradematch::OrderBook>(workload, kV2Name, [&capacity] {
+            return std::make_unique<tradematch::OrderBook>(capacity);
+        }));
+        print_engine(options, *reports.back());
+    }
+    if (reports.size() == 2) {
+        print_comparison(*reports.front(), *reports.back());
+    }
 
     if (!options.json_path.empty()) {
         write_json(options.json_path, options, workload, clock, reports);

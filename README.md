@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml)
 [![Fuzz](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml)
-![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -29,6 +29,8 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Cancel by order ID
 - Replace by order ID
 - Resting-order lookup by order ID
+- Machine-readable reject reasons for every rejected request
+- Zero heap allocations on the request path once capacity is reserved
 - Deterministic benchmark/demo scenarios
 
 ## API Overview
@@ -40,12 +42,21 @@ Core public API:
 - `replace(OrderRequest)` validates, cancels, and resubmits an active order using the same ID. The replacement must keep the resting order's side and limit type.
 - `get_order(OrderId)` returns the current resting state for an active order.
 - `get_orders_at_level(Side, Price)` exposes FIFO order state for a price level.
+- `best_bid()` / `best_ask()` return the top of book, and `level_count(Side)` the number of price levels.
 - `snapshot()` returns visible bid/ask levels for inspection and tests.
+
+Results are plain values that never own heap memory:
+
+- `trades` is a `std::span<const Trade>` over a buffer the book reuses, valid until the book's next `submit` or `replace`. Copy the trades out if you need them longer.
+- `message` is a `std::string_view` of a static string.
+- `reject_reason` is a `RejectReason` enum (`InvalidOrderId`, `InvalidQuantity`, `InvalidPrice`, `DuplicateOrderId`, `UnknownOrder`, `SideChange`, `TypeChange`) for programmatic handling.
+
+`OrderBook` takes an optional `BookCapacity` (orders, price levels per side, trades per call). Pools grow automatically, but sizing them for the expected peak keeps the request path free of allocator calls.
 
 Minimal usage:
 
 ```cpp
-tradematch::OrderBook book;
+tradematch::OrderBook book(tradematch::BookCapacity{.orders = 100'000, .price_levels = 4'096});
 
 auto add = book.submit({1, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10050});
 auto replace = book.replace({1, tradematch::Side::Buy, tradematch::OrderType::Limit, 80, 10075});
@@ -81,27 +92,33 @@ The matching core is intentionally single-threaded. That keeps sequencing determ
 
 ### Core Data Structures
 
-- `std::map<Price, std::list<RestingOrder>, std::greater<>>` for bids
-- `std::map<Price, std::list<RestingOrder>, std::less<>>` for asks
-- `std::unordered_map<OrderId, OrderLocator>` for active-order lookup and cancel
+The book is index based: every structure is a flat array addressed by 32-bit slots, so nothing is allocated per order.
 
-Why this layout:
+```text
+ asks ladder (best at back)        price level (pooled)                 order nodes (pooled)
+ ┌──────────┬────────┐            ┌────────────────────────┐          ┌───────┐   ┌───────┐   ┌───────┐
+ │ 101.03   │ slot 7 │            │ price 101.01           │  head ──►│  #42  │◄─►│  #57  │◄─►│  #61  │◄── tail
+ │ 101.02   │ slot 2 │            │ 900 shares, 3 orders   │          │  300  │   │  500  │   │  100  │
+ │ 101.01   │ slot 4 │ ─────────► │ head slot, tail slot   │          └───────┘   └───────┘   └───────┘
+ └──────────┴────────┘            └────────────────────────┘           intrusive FIFO list: time priority
+   best ask ▲
 
-- integer price ticks avoid floating-point comparison issues in matching logic
-- `std::map` keeps best bid / best ask at the front in sorted order.
-- `std::list` preserves FIFO within a price level and gives stable iterators.
-- `std::unordered_map` gives direct access to the resting order for cancellation.
+ order index: open-addressing hash table, order ID ──► node slot (O(1) cancel and replace)
+```
 
-This yields:
+- **Order pool**: resting orders live in one `std::vector<OrderNode>` (40 bytes each) and are linked into an intrusive doubly linked FIFO list per price level. Freed slots go on a free list and are reused, so steady-state traffic never touches the allocator.
+- **Price ladders**: each side keeps `{price, level slot}` entries in a vector sorted so the best price is at the back. Bids are ascending and asks descending. Taking or removing the best level is `pop_back`, joining the best price is a one-comparison fast path, and new levels, which usually appear near the touch, shift only a handful of entries.
+- **Order index**: a purpose-built open-addressing hash table ([order_index.hpp](include/tradematch/detail/order_index.hpp)) with linear probing, Fibonacci hashing, and backward-shift deletion. It maps an order ID to its node slot in one or two cache lines, and heavy cancel traffic never leaves tombstones behind.
+- **Trade buffer**: trades are appended to a reusable vector and returned as a span.
 
-- clear price priority across levels
-- clear time priority within a level
-- efficient cancel without scanning the whole book
+Cancel is O(1): an index lookup, then unlinking the node from its level. Only when a level empties does the ladder entry get erased.
 
 ### Design Tradeoffs
 
-- The engine is single-threaded by design. That keeps sequencing deterministic and makes correctness easier to inspect, but it is not a full multi-producer exchange gateway.
-- `std::map` plus `std::list` is not the most cache-optimized possible layout, but it gives very clear price ordering, stable iterators for cancel, and compact code.
+- The engine is single-threaded by design. That keeps sequencing deterministic and makes correctness easy to inspect. Concurrency belongs around the engine, in the gateway and market data layers, not inside the matching loop.
+- The original engine (`std::map` levels, `std::list` queues, `std::unordered_map` index) is kept in [bench/baseline](bench/baseline) as the "before" in benchmarks. It was easy to read but allocated 1.83 times per operation, and those allocations dominated its tail latency.
+- Sorted vectors beat trees for price levels because books are shallow and activity concentrates near the touch. The worst case (a new level deep in a very wide book) costs a short `memmove`, never an allocation.
+- Returning trades as a span trades a small amount of API convenience (the view is invalidated by the next call) for zero allocations per request.
 - Replace is intentionally modeled as validate, cancel, and resubmit. That keeps the implementation simple and makes the priority reset explicit instead of hiding it.
 
 ## Repository Layout
@@ -117,21 +134,28 @@ This yields:
 ├── CMakeLists.txt
 ├── Makefile
 ├── include/tradematch/
+│   ├── detail/
+│   │   └── order_index.hpp
 │   ├── order_book.hpp
 │   └── types.hpp
 ├── src/
 │   ├── formatting.cpp
 │   └── order_book.cpp
 ├── bench/
+│   ├── baseline/
+│   │   ├── map_order_book.cpp
+│   │   └── map_order_book.hpp
 │   ├── benchmark_main.cpp
 │   ├── latency_histogram.hpp
 │   ├── system_info.hpp
 │   ├── workload.cpp
 │   └── workload.hpp
 ├── tests/
+│   ├── allocation_tests.cpp
 │   ├── bench_tests.cpp
 │   ├── differential_tests.cpp
 │   ├── order_book_tests.cpp
+│   ├── order_index_tests.cpp
 │   └── support/
 │       ├── differential.hpp
 │       └── reference_book.hpp
@@ -146,7 +170,7 @@ This yields:
 
 Requirements:
 
-- A C++17 compiler
+- A C++20 compiler (GCC 11+, Clang 16+, Apple Clang 15+, or MSVC 19.30+)
 - Optional: CMake 3.16+ if you want the CMake workflow
 
 Fastest path:
@@ -277,7 +301,16 @@ The test suite covers deterministic scenarios that matter for correctness:
 - lookups for missing price levels and unknown order IDs
 - price formatting at the extremes of the 64-bit range
 - best bid / best ask tracking as levels are consumed and cancelled
+- reject reasons for every validation failure, unknown order, and illegal replace
+- a book that starts with room for one order, one level, and one trade, then grows transparently through a 1,000-trade sweep
 - invariant checks after every submit, cancel, and replace
+
+Two more suites target the v2 internals:
+
+- **Zero-allocation proof** ([tests/allocation_tests.cpp](tests/allocation_tests.cpp)): replaces global `operator new` to count every heap allocation, replays the benchmark's 1,000,000-operation stream after warm-up, and fails if the engine allocates even once. The v1 baseline is counted on the same stream for comparison: 1.83 million allocations, against 0 for v2.
+- **Order index** ([tests/order_index_tests.cpp](tests/order_index_tests.cpp)): 300,000 random inserts and erases over a small key space, checked against `std::unordered_map`. The small key space forces long probe runs, wrap-around, and constant backward-shift deletions. Further cases cover growth, reserved capacity, and the reserved key 0.
+
+The differential test also starts every other seed with a book sized for a single order, level, and trade, so the pools and the index grow constantly while being checked.
 
 The benchmark tooling has its own tests ([tests/bench_tests.cpp](tests/bench_tests.cpp)). They check that histogram percentiles stay within the documented error bound against exact sorted percentiles, that the workload generator is deterministic per seed, and that every generated stream replays with zero rejected commands.
 
@@ -305,30 +338,39 @@ cmake --build build-fuzz --target tradematch_fuzzer
 
 ## Performance
 
-`tradematch_benchmark` measures per-operation latency on realistic order flow, not just average throughput.
+`tradematch_benchmark` replays one realistic order stream through both engines: the original `std::map`/`std::list` design (v1, kept in [bench/baseline](bench/baseline)) and the allocation-free v2 engine. It reports per-operation latency percentiles, not just average throughput.
+
+Results on an Apple M4 (Apple clang 21, Release build, median of 5 runs):
+
+| metric | v1 baseline | v2 | improvement |
+| --- | ---: | ---: | ---: |
+| throughput | 11.8 M ops/s | **61.1 M ops/s** | **5.2x** |
+| mean latency | 79.6 ns | **17.9 ns** | **4.5x** |
+| p99.9 | 375 ns | **125 ns** | **3.0x** |
+| p99.99 | 3,471 ns | **250 ns** | **13.9x** |
+| heap allocations per operation | 1.83 | **0** | |
+
+v2 per-operation percentiles (1,000,000 measured operations, 138,997 trades):
+
+| operation | count | p50 | p90 | p99 | p99.9 | p99.99 | mean |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| add | 459,871 | <41 ns | 42 ns | 42 ns | 84 ns | 167 ns | 18.9 ns |
+| cancel | 390,361 | <41 ns | 42 ns | 42 ns | 125 ns | 250 ns | 15.3 ns |
+| modify | 80,097 | 41 ns | 42 ns | 42 ns | 125 ns | 333 ns | 21.6 ns |
+| aggressive | 69,671 | <41 ns | 42 ns | 42 ns | 125 ns | 667 ns | 21.2 ns |
+| **all** | **1,000,000** | **<41 ns** | **42 ns** | **42 ns** | **125 ns** | **250 ns** | **17.9 ns** |
+
+The biggest gain is in the deep tail. v1 allocates map nodes, list nodes, a trade vector, and a message string on most requests, and every trip into the allocator risks a slow path. v2 never calls the allocator, so its p99.99 is 14 times lower.
 
 **Workload.** A generator produces a deterministic stream that resembles real exchange traffic. Passive limit orders cluster near the touch, at a geometric distance behind the best price. Cancels and modifies always target orders that are still live. Aggressive orders are marketable limits that can sweep several levels, or market orders. The book is prefilled with 10,000 resting orders, and the flow keeps it near that depth, so measurements reflect a steady state rather than a growing book. The realized mix is 46% add, 39% cancel, 8% modify, and 7% aggressive, close to the message proportions of public exchange feeds.
 
-**Method.** The whole stream is generated before timing starts, so generator cost never reaches the measured loop and every engine replays identical input. After 100,000 warm-up operations, each of the 1,000,000 measured operations is timed individually and recorded in an HDR-style log-linear histogram. Its reported percentiles are never below the true value and at most 0.8% above it. Throughput comes from a second replay with no clock reads in the loop.
-
-Results on an Apple M4 (Apple clang 21, Release build, median of 5 runs by p99):
-
-| operation | count | p50 | p90 | p99 | p99.9 | p99.99 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| add | 459,871 | 83 ns | 125 ns | 166 ns | 375 ns | 3,967 ns |
-| cancel | 390,361 | 42 ns | 84 ns | 167 ns | 543 ns | 3,583 ns |
-| modify | 80,097 | 167 ns | 209 ns | 333 ns | 875 ns | 8,959 ns |
-| aggressive | 69,671 | 125 ns | 209 ns | 375 ns | 959 ns | 4,639 ns |
-| **all** | **1,000,000** | **83 ns** | **166 ns** | **250 ns** | **587 ns** | **4,767 ns** |
-
-Throughput: **10.4 million operations per second** on a single core, producing 139,000 trades.
+**Method.** The whole stream is generated before timing starts, so generator cost never reaches the measured loop and both engines replay identical input. After 100,000 warm-up operations, each of the 1,000,000 measured operations is timed individually and recorded in an HDR-style log-linear histogram. Its reported percentiles are never below the true value and at most 0.8% above it. Throughput comes from a second replay with no clock reads in the loop.
 
 Notes for reading the numbers:
 
-- Apple Silicon's user-space clock ticks at 24 MHz, so samples are quantized to about 41 ns. Linux on x86 reports nanosecond resolution.
-- Every sample includes one clock read, about 13 ns.
-- Percentiles up to p99.9 are stable across runs. p99.99 and the maximum mostly reflect operating-system noise (interrupts, page faults, scheduler preemption) on a desktop machine.
-- Each submit in this engine allocates map nodes, list nodes, the trade vector, and the result message, and those allocations dominate the tail.
+- Apple Silicon's user-space clock ticks at 24 MHz (about 41 ns), and most v2 operations finish within a single tick. Percentiles below one tick print as `<41 ns`, and the benchmark doesn't compute ratios for percentiles within a tick of zero. The mean is still accurate: it averages samples taken at random phases of the tick. Linux on x86 reports nanosecond resolution.
+- Every sample includes one clock read, about 12 ns, which flatters neither engine.
+- p99.9 and below are stable across runs. The maximum mostly reflects operating-system noise (interrupts and preemption) on a desktop machine.
 
 ## Continuous Integration
 
@@ -341,7 +383,7 @@ Every push runs two workflows:
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
 | CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
 | CI | Benchmark smoke test | `tradematch_benchmark` runs a short workload under CTest on every platform |
-| CI | Coverage | Engine line coverage must stay at or above 95% (currently 97% of lines and branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
+| CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
 | Fuzz | libFuzzer | Coverage-guided fuzzing under ASan + UBSan: 60 seconds per push and 20 minutes nightly. The corpus is cached between runs, so coverage keeps growing |
 

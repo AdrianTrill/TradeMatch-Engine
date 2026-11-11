@@ -401,6 +401,58 @@ void test_top_of_book_tracks_best_prices() {
     expect_equal(book.best_bid().value_or(0), tradematch::Price{9900}, "Cancelling the best bid exposes the next.");
 }
 
+void test_reject_reasons_are_reported() {
+    using tradematch::OrderType;
+    using tradematch::RejectReason;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10000});
+
+    const auto reason_of = [&](const tradematch::OrderRequest& order) {
+        return book.submit(order).reject_reason;
+    };
+    expect(reason_of({0, Side::Buy, OrderType::Limit, 10, 10000}) == RejectReason::InvalidOrderId, "ID 0.");
+    expect(reason_of({2, Side::Buy, OrderType::Limit, 0, 10000}) == RejectReason::InvalidQuantity, "Zero quantity.");
+    expect(reason_of({2, Side::Buy, OrderType::Limit, 10, -1}) == RejectReason::InvalidPrice, "Negative price.");
+    expect(reason_of({2, Side::Buy, OrderType::Limit, 10, 0}) == RejectReason::InvalidPrice, "Zero limit price.");
+    expect(reason_of({2, Side::Buy, OrderType::Market, 10, 5}) == RejectReason::InvalidPrice, "Priced market order.");
+    expect(reason_of({1, Side::Sell, OrderType::Limit, 10, 10000}) == RejectReason::DuplicateOrderId, "Duplicate.");
+
+    expect(book.cancel(99).reject_reason == RejectReason::UnknownOrder, "Unknown cancel.");
+    expect(book.replace({99, Side::Buy, OrderType::Limit, 10, 10000}).reject_reason == RejectReason::UnknownOrder,
+           "Unknown replace.");
+    expect(book.replace({1, Side::Sell, OrderType::Limit, 10, 10000}).reject_reason == RejectReason::SideChange,
+           "Side change.");
+    expect(book.replace({1, Side::Buy, OrderType::Market, 10, 0}).reject_reason == RejectReason::TypeChange,
+           "Type change.");
+    expect(book.replace({1, Side::Buy, OrderType::Limit, 0, 10000}).reject_reason == RejectReason::InvalidQuantity,
+           "Invalid replacement quantity.");
+
+    const auto accepted = submit_checked(book, {2, Side::Sell, OrderType::Limit, 5, 10100});
+    expect(accepted.reject_reason == RejectReason::None, "Accepted orders carry no reject reason.");
+    expect(std::string{tradematch::to_string(RejectReason::DuplicateOrderId)} == "DUPLICATE_ORDER_ID",
+           "Reject reasons have stable names.");
+    expect_equal(book.order_count(), std::size_t{2}, "Rejected requests must leave the book unchanged.");
+}
+
+void test_tiny_capacity_grows_transparently() {
+    tradematch::OrderBook book(tradematch::BookCapacity{1, 1, 1});
+
+    tradematch::OrderId next_id = 1;
+    for (tradematch::Price price = 10000; price < 10100; ++price) {
+        for (int order = 0; order < 10; ++order) {
+            submit_checked(book, {next_id++, tradematch::Side::Sell, tradematch::OrderType::Limit, 5, price});
+        }
+    }
+    expect_equal(book.order_count(), std::size_t{1000}, "All orders should rest after the pools grow.");
+    expect_equal(book.level_count(tradematch::Side::Sell), std::size_t{100}, "Each price should get its own level.");
+
+    const auto sweep = submit_checked(book, {next_id, tradematch::Side::Buy, tradematch::OrderType::Market, 5000, 0});
+    expect_equal(sweep.trades.size(), std::size_t{1000}, "The sweep should trade with every resting order.");
+    expect_equal(sweep.trades.back().price, tradematch::Price{10099}, "The last fill should be the worst level.");
+    expect_equal(book.order_count(), std::size_t{0}, "The sweep should empty the book.");
+}
+
 void test_formatting_helpers() {
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Buy)}, std::string{"BUY"}, "Buy side label.");
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Sell)}, std::string{"SELL"}, "Sell side label.");
@@ -410,6 +462,21 @@ void test_formatting_helpers() {
     expect_equal(std::string{tradematch::to_string(tradematch::OrderType::Market)},
                  std::string{"MARKET"},
                  "Market order label.");
+
+    using tradematch::RejectReason;
+    const std::vector<std::pair<RejectReason, std::string>> reasons = {
+        {RejectReason::None, "NONE"},
+        {RejectReason::InvalidOrderId, "INVALID_ORDER_ID"},
+        {RejectReason::InvalidQuantity, "INVALID_QUANTITY"},
+        {RejectReason::InvalidPrice, "INVALID_PRICE"},
+        {RejectReason::DuplicateOrderId, "DUPLICATE_ORDER_ID"},
+        {RejectReason::UnknownOrder, "UNKNOWN_ORDER"},
+        {RejectReason::SideChange, "SIDE_CHANGE"},
+        {RejectReason::TypeChange, "TYPE_CHANGE"},
+    };
+    for (const auto& [reason, name] : reasons) {
+        expect_equal(std::string{tradematch::to_string(reason)}, name, "Reject reason names should be stable.");
+    }
 
     expect_equal(tradematch::format_price(10050), std::string{"100.50"}, "Ticks should format as cents.");
     expect_equal(tradematch::format_price(5), std::string{"0.05"}, "Sub-dollar prices should be zero padded.");
@@ -447,6 +514,8 @@ int run_all_tests() {
         {"replace_that_crosses_the_book_fills_immediately", test_replace_that_crosses_the_book_fills_immediately},
         {"level_lookup_for_missing_price_is_empty", test_level_lookup_for_missing_price_is_empty},
         {"top_of_book_tracks_best_prices", test_top_of_book_tracks_best_prices},
+        {"reject_reasons_are_reported", test_reject_reasons_are_reported},
+        {"tiny_capacity_grows_transparently", test_tiny_capacity_grows_transparently},
         {"formatting_helpers", test_formatting_helpers},
     };
 

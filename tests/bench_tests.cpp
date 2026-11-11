@@ -34,7 +34,7 @@ void expect(bool condition, const std::string& message) {
 }
 
 std::uint64_t exact_percentile(std::vector<std::uint64_t> values, double percent) {
-    std::sort(values.begin(), values.end());
+    std::ranges::sort(values);
     const auto rank = static_cast<std::size_t>(std::ceil(percent / 100.0 * static_cast<double>(values.size())));
     return values.at(std::max<std::size_t>(rank, 1) - 1);
 }
@@ -115,9 +115,9 @@ void test_workload_is_deterministic() {
                left.order.side == right.order.side && left.order.type == right.order.type &&
                left.order.quantity == right.order.quantity && left.order.price == right.order.price;
     };
-    expect(std::equal(first.commands.begin(), first.commands.end(), second.commands.begin(), same_command),
+    expect(std::ranges::equal(first.commands, second.commands, same_command),
            "The same seed should produce an identical stream.");
-    expect(!std::equal(first.commands.begin(), first.commands.end(), other.commands.begin(), same_command),
+    expect(!std::ranges::equal(first.commands, other.commands, same_command),
            "A different seed should produce a different stream.");
 
     std::size_t mix_total = 0;

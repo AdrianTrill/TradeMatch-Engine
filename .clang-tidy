@@ -26,5 +26,7 @@ Checks: >
   -readability-uppercase-literal-suffix,
   -readability-math-missing-parentheses
 WarningsAsErrors: "*"
-HeaderFilterRegex: "/(include|src|tests|tools|fuzz)/"
+HeaderFilterRegex: "/(include|src|tests|tools|fuzz|bench)/"
+# System and SDK headers also live under */include/; never report diagnostics located in them.
+ExcludeHeaderFilterRegex: "^(/usr/|/Library/|/Applications/|/opt/)"
 FormatStyle: none

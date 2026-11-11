@@ -1,376 +1,403 @@
 #include "tradematch/order_book.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <ranges>
+#include <stdexcept>
 
 namespace tradematch {
 
-std::string OrderBook::validate_request(const OrderRequest& order, OrderId ignored_order_id) const {
+namespace {
+
+constexpr bool crosses(Side aggressor, Price limit, Price resting) noexcept {
+    return aggressor == Side::Buy ? resting <= limit : resting >= limit;
+}
+
+// Bids are stored ascending and asks descending, so in both ladders the best price sits at the back.
+template <typename Ladder>
+auto ladder_lower_bound(Ladder& ladder, Side side, Price price) {
+    if (side == Side::Buy) {
+        return std::ranges::lower_bound(ladder, price, std::less{}, [](const auto& entry) { return entry.price; });
+    }
+    return std::ranges::lower_bound(ladder, price, std::greater{}, [](const auto& entry) { return entry.price; });
+}
+
+}  // namespace
+
+OrderBook::OrderBook(const BookCapacity& capacity) : index_(capacity.orders) {
+    nodes_.reserve(capacity.orders);
+    levels_.reserve(capacity.price_levels * 2);
+    bids_.reserve(capacity.price_levels);
+    asks_.reserve(capacity.price_levels);
+    trades_.reserve(capacity.trades_per_call);
+}
+
+OrderBook::Rejection OrderBook::validate(const OrderRequest& order, bool replacing) const noexcept {
     if (order.order_id == 0U) {
-        return "Order ID must be greater than zero.";
+        return {RejectReason::InvalidOrderId, "Order ID must be greater than zero."};
     }
-
     if (order.quantity == 0U) {
-        return "Order quantity must be greater than zero.";
+        return {RejectReason::InvalidQuantity, "Order quantity must be greater than zero."};
     }
-
     if (order.price < 0) {
-        return "Order price cannot be negative.";
+        return {RejectReason::InvalidPrice, "Order price cannot be negative."};
     }
-
     if (order.type == OrderType::Limit && order.price <= 0) {
-        return "Limit order price must be greater than zero.";
+        return {RejectReason::InvalidPrice, "Limit order price must be greater than zero."};
     }
-
     if (order.type == OrderType::Market && order.price != 0) {
-        return "Market order price must be zero.";
+        return {RejectReason::InvalidPrice, "Market order price must be zero."};
     }
-
-    const auto active_order_it = order_index_.find(order.order_id);
-    if (active_order_it != order_index_.end() && order.order_id != ignored_order_id) {
-        return "Order ID is already active in the book.";
+    if (!replacing && index_.contains(order.order_id)) {
+        return {RejectReason::DuplicateOrderId, "Order ID is already active in the book."};
     }
-
     return {};
 }
 
 SubmitResult OrderBook::submit(const OrderRequest& order) {
+    trades_.clear();
+
     SubmitResult result;
     result.order_id = order.order_id;
     result.remaining_quantity = order.quantity;
 
-    const auto validation_error = validate_request(order);
-    if (!validation_error.empty()) {
-        result.message = validation_error;
+    const auto rejection = validate(order, false);
+    if (rejection.reason != RejectReason::None) {
+        result.reject_reason = rejection.reason;
+        result.message = rejection.message;
         return result;
     }
 
-    WorkingOrder incoming{order, order.quantity, next_sequence_++};
+    execute(order, result);
+    return result;
+}
+
+void OrderBook::execute(const OrderRequest& order, SubmitResult& result) {
+    const SequenceNumber sequence = next_sequence_++;
     result.accepted = true;
 
-    if (order.side == Side::Buy) {
-        match_buy_order(incoming, result);
-    } else {
-        match_sell_order(incoming, result);
-    }
+    Quantity remaining = order.quantity;
+    match(order, remaining);
 
-    result.remaining_quantity = incoming.remaining_quantity;
-    result.filled_quantity = static_cast<Quantity>(order.quantity - incoming.remaining_quantity);
+    result.trades = trades_;
+    result.remaining_quantity = remaining;
+    result.filled_quantity = order.quantity - remaining;
 
-    if (incoming.remaining_quantity == 0U) {
+    if (remaining == 0U) {
         result.message = "Order fully filled.";
-        return result;
+        return;
     }
 
     if (order.type == OrderType::Market) {
         result.expired = true;
-        if (result.filled_quantity > 0U) {
-            result.message = "Market order consumed available liquidity and expired with an unfilled remainder.";
-        } else {
-            result.message = "Market order expired because no opposing liquidity was available.";
-        }
-        return result;
+        result.message = result.filled_quantity > 0U
+                             ? "Market order consumed available liquidity and expired with an unfilled remainder."
+                             : "Market order expired because no opposing liquidity was available.";
+        return;
     }
 
-    rest_order(incoming);
+    rest(order, remaining, sequence);
     result.rested = true;
-    if (result.filled_quantity > 0U) {
-        result.message = "Order partially filled and remainder added to the book.";
-    } else {
-        result.message = "Order added to the book.";
-    }
-
-    return result;
+    result.message = result.filled_quantity > 0U ? "Order partially filled and remainder added to the book."
+                                                 : "Order added to the book.";
 }
 
 CancelResult OrderBook::cancel(OrderId order_id) {
     CancelResult result;
     result.order_id = order_id;
 
-    const auto locator_it = order_index_.find(order_id);
-    if (locator_it == order_index_.end()) {
+    const Slot node_slot = index_.find(order_id);
+    if (node_slot == detail::OrderIndex::kMissing) {
+        result.reject_reason = RejectReason::UnknownOrder;
         result.message = "Order not found.";
         return result;
     }
 
-    const OrderLocator locator = locator_it->second;
-    OrderQueue* queue = nullptr;
-
-    if (locator.side == Side::Buy) {
-        auto level_it = bids_.find(locator.price);
-        queue = &level_it->second;
-    } else {
-        auto level_it = asks_.find(locator.price);
-        queue = &level_it->second;
-    }
-
     result.cancelled = true;
-    result.cancelled_quantity = locator.iterator->remaining_quantity;
+    result.cancelled_quantity = nodes_[node_slot].remaining;
     result.message = "Order cancelled.";
-    queue->erase(locator.iterator);
-    order_index_.erase(locator_it);
-
-    if (locator.side == Side::Buy) {
-        auto level_it = bids_.find(locator.price);
-        if (level_it != bids_.end() && level_it->second.empty()) {
-            bids_.erase(level_it);
-        }
-    } else {
-        auto level_it = asks_.find(locator.price);
-        if (level_it != asks_.end() && level_it->second.empty()) {
-            asks_.erase(level_it);
-        }
-    }
-
+    remove_resting(node_slot);
     return result;
 }
 
 ReplaceResult OrderBook::replace(const OrderRequest& replacement) {
+    trades_.clear();
+
     ReplaceResult result;
     result.order_id = replacement.order_id;
 
-    const auto existing_order_it = order_index_.find(replacement.order_id);
-    if (existing_order_it == order_index_.end()) {
+    const Slot node_slot = index_.find(replacement.order_id);
+    if (node_slot == detail::OrderIndex::kMissing) {
+        result.reject_reason = RejectReason::UnknownOrder;
         result.message = "Order not found.";
         return result;
     }
 
-    if (replacement.side != existing_order_it->second.side) {
+    const OrderNode& existing = nodes_[node_slot];
+    if (replacement.side != existing.side) {
+        result.reject_reason = RejectReason::SideChange;
         result.message = "Replace cannot change the order side.";
         return result;
     }
-
     if (replacement.type != OrderType::Limit) {
+        result.reject_reason = RejectReason::TypeChange;
         result.message = "Replace must keep the limit order type of the resting order.";
         return result;
     }
 
-    const auto validation_error = validate_request(replacement, replacement.order_id);
-    if (!validation_error.empty()) {
-        result.message = validation_error;
+    const auto rejection = validate(replacement, true);
+    if (rejection.reason != RejectReason::None) {
+        result.reject_reason = rejection.reason;
+        result.message = rejection.message;
         return result;
     }
 
-    result.previous_remaining_quantity = existing_order_it->second.iterator->remaining_quantity;
+    // Replace is cancel plus resubmit under the same ID, so the order intentionally loses its time priority.
+    result.previous_remaining_quantity = existing.remaining;
+    remove_resting(node_slot);
 
-    // Replace is modeled as validate -> cancel -> resubmit, which intentionally resets time priority.
-    cancel(replacement.order_id);
-    result.submit_result = submit(replacement);
-    result.replaced = result.submit_result.accepted;
+    result.submit_result.order_id = replacement.order_id;
+    result.submit_result.remaining_quantity = replacement.quantity;
+    execute(replacement, result.submit_result);
 
-    if (!result.replaced) {
-        result.message = "Order replacement failed.";
-        return result;
-    }
-
-    if (result.submit_result.rested) {
-        result.message = "Order replaced and re-entered the book with a new priority timestamp.";
-    } else {
-        result.message = "Order replaced and fully filled immediately.";
-    }
-
+    result.replaced = true;
+    result.message = result.submit_result.rested
+                         ? "Order replaced and re-entered the book with a new priority timestamp."
+                         : "Order replaced and fully filled immediately.";
     return result;
 }
 
-bool OrderBook::has_order(OrderId order_id) const {
-    return order_index_.find(order_id) != order_index_.end();
+bool OrderBook::has_order(OrderId order_id) const noexcept {
+    return index_.contains(order_id);
 }
 
 std::optional<RestingOrderView> OrderBook::get_order(OrderId order_id) const {
-    const auto locator_it = order_index_.find(order_id);
-    if (locator_it == order_index_.end()) {
+    const Slot node_slot = index_.find(order_id);
+    if (node_slot == detail::OrderIndex::kMissing) {
         return std::nullopt;
     }
-
-    const auto& order = *locator_it->second.iterator;
-    return RestingOrderView{
-        order.order_id,
-        order.side,
-        order.price,
-        order.remaining_quantity,
-        order.sequence,
-    };
+    const OrderNode& node = nodes_[node_slot];
+    return RestingOrderView{node.order_id, node.side, levels_[node.level].price, node.remaining, node.sequence};
 }
 
 std::vector<RestingOrderView> OrderBook::get_orders_at_level(Side side, Price price) const {
     std::vector<RestingOrderView> orders;
-
-    if (side == Side::Buy) {
-        const auto level_it = bids_.find(price);
-        if (level_it == bids_.end()) {
-            return orders;
-        }
-
-        for (const auto& order : level_it->second) {
-            orders.push_back(
-                RestingOrderView{order.order_id, order.side, order.price, order.remaining_quantity, order.sequence});
-        }
+    const auto entry = find_ladder_entry(side, price);
+    if (entry == ladder(side).end()) {
         return orders;
     }
 
-    const auto level_it = asks_.find(price);
-    if (level_it == asks_.end()) {
-        return orders;
+    const PriceLevel& level = levels_[entry->level];
+    orders.reserve(level.order_count);
+    for (Slot node_slot = level.head; node_slot != kNone; node_slot = nodes_[node_slot].next) {
+        const OrderNode& node = nodes_[node_slot];
+        orders.push_back(RestingOrderView{node.order_id, node.side, level.price, node.remaining, node.sequence});
     }
-
-    for (const auto& order : level_it->second) {
-        orders.push_back(
-            RestingOrderView{order.order_id, order.side, order.price, order.remaining_quantity, order.sequence});
-    }
-
     return orders;
 }
 
-std::optional<Price> OrderBook::best_bid() const {
+std::optional<Price> OrderBook::best_bid() const noexcept {
     if (bids_.empty()) {
         return std::nullopt;
     }
-    return bids_.begin()->first;
+    return bids_.back().price;
 }
 
-std::optional<Price> OrderBook::best_ask() const {
+std::optional<Price> OrderBook::best_ask() const noexcept {
     if (asks_.empty()) {
         return std::nullopt;
     }
-    return asks_.begin()->first;
+    return asks_.back().price;
 }
 
 BookSnapshot OrderBook::snapshot() const {
+    const auto collect = [this](const Ladder& side_ladder, std::vector<PriceLevelView>& views) {
+        views.reserve(side_ladder.size());
+        for (const LadderEntry& entry : std::views::reverse(side_ladder)) {
+            const PriceLevel& level = levels_[entry.level];
+            PriceLevelView view{level.price, level.total_quantity, level.order_count, {}};
+            view.order_ids.reserve(level.order_count);
+            for (Slot node_slot = level.head; node_slot != kNone; node_slot = nodes_[node_slot].next) {
+                view.order_ids.push_back(nodes_[node_slot].order_id);
+            }
+            views.push_back(std::move(view));
+        }
+    };
+
     BookSnapshot book_snapshot;
-
-    for (const auto& [price, queue] : bids_) {
-        PriceLevelView level;
-        level.price = price;
-        level.order_count = queue.size();
-
-        for (const auto& order : queue) {
-            level.total_quantity += order.remaining_quantity;
-            level.order_ids.push_back(order.order_id);
-        }
-
-        book_snapshot.bids.push_back(level);
-    }
-
-    for (const auto& [price, queue] : asks_) {
-        PriceLevelView level;
-        level.price = price;
-        level.order_count = queue.size();
-
-        for (const auto& order : queue) {
-            level.total_quantity += order.remaining_quantity;
-            level.order_ids.push_back(order.order_id);
-        }
-
-        book_snapshot.asks.push_back(level);
-    }
-
+    collect(bids_, book_snapshot.bids);
+    collect(asks_, book_snapshot.asks);
     return book_snapshot;
 }
 
-void OrderBook::match_buy_order(WorkingOrder& incoming, SubmitResult& result) {
-    while (incoming.remaining_quantity > 0U && !asks_.empty()) {
-        auto best_ask_it = asks_.begin();
-        if (incoming.request.type == OrderType::Limit && best_ask_it->first > incoming.request.price) {
+void OrderBook::match(const OrderRequest& order, Quantity& remaining) {
+    Ladder& opposite = ladder(order.side == Side::Buy ? Side::Sell : Side::Buy);
+
+    while (remaining > 0U && !opposite.empty()) {
+        const LadderEntry best = opposite.back();
+        if (order.type == OrderType::Limit && !crosses(order.side, order.price, best.price)) {
             return;
         }
 
-        auto& resting_queue = best_ask_it->second;
-        while (incoming.remaining_quantity > 0U && !resting_queue.empty()) {
-            auto resting_it = resting_queue.begin();
-            auto& resting_order = *resting_it;
-            const auto trade_quantity =
-                static_cast<Quantity>(std::min(incoming.remaining_quantity, resting_order.remaining_quantity));
+        PriceLevel& level = levels_[best.level];
+        while (remaining > 0U && level.head != kNone) {
+            const Slot node_slot = level.head;
+            OrderNode& resting = nodes_[node_slot];
+            const Quantity fill = std::min(remaining, resting.remaining);
 
-            append_trade(incoming, resting_order, trade_quantity, resting_order.price, result);
+            record_trade(order, resting.order_id, level.price, fill);
+            remaining -= fill;
+            resting.remaining -= fill;
+            level.total_quantity -= fill;
 
-            incoming.remaining_quantity -= trade_quantity;
-            resting_order.remaining_quantity -= trade_quantity;
-
-            if (resting_order.remaining_quantity == 0U) {
-                order_index_.erase(resting_order.order_id);
-                resting_queue.erase(resting_it);
+            if (resting.remaining == 0U) {
+                level.head = resting.next;
+                if (level.head != kNone) {
+                    nodes_[level.head].prev = kNone;
+                } else {
+                    level.tail = kNone;
+                }
+                --level.order_count;
+                index_.erase(resting.order_id);
+                release_node(node_slot);
             }
         }
 
-        if (resting_queue.empty()) {
-            asks_.erase(best_ask_it);
+        if (level.head == kNone) {
+            opposite.pop_back();
+            release_level(best.level);
         }
     }
 }
 
-void OrderBook::match_sell_order(WorkingOrder& incoming, SubmitResult& result) {
-    while (incoming.remaining_quantity > 0U && !bids_.empty()) {
-        auto best_bid_it = bids_.begin();
-        if (incoming.request.type == OrderType::Limit && best_bid_it->first < incoming.request.price) {
-            return;
-        }
+void OrderBook::rest(const OrderRequest& order, Quantity remaining, SequenceNumber sequence) {
+    const Slot level_slot = find_or_create_level(order.side, order.price);
+    const Slot node_slot = allocate_node();
 
-        auto& resting_queue = best_bid_it->second;
-        while (incoming.remaining_quantity > 0U && !resting_queue.empty()) {
-            auto resting_it = resting_queue.begin();
-            auto& resting_order = *resting_it;
-            const auto trade_quantity =
-                static_cast<Quantity>(std::min(incoming.remaining_quantity, resting_order.remaining_quantity));
+    PriceLevel& level = levels_[level_slot];
+    OrderNode& node = nodes_[node_slot];
+    node = OrderNode{order.order_id, sequence, remaining, level_slot, level.tail, kNone, order.side};
 
-            append_trade(incoming, resting_order, trade_quantity, resting_order.price, result);
-
-            incoming.remaining_quantity -= trade_quantity;
-            resting_order.remaining_quantity -= trade_quantity;
-
-            if (resting_order.remaining_quantity == 0U) {
-                order_index_.erase(resting_order.order_id);
-                resting_queue.erase(resting_it);
-            }
-        }
-
-        if (resting_queue.empty()) {
-            bids_.erase(best_bid_it);
-        }
-    }
-}
-
-void OrderBook::rest_order(const WorkingOrder& order) {
-    const RestingOrder resting_order{
-        order.request.order_id,
-        order.request.side,
-        order.request.price,
-        order.remaining_quantity,
-        order.sequence,
-    };
-
-    if (resting_order.side == Side::Buy) {
-        auto& queue = bids_[resting_order.price];
-        queue.push_back(resting_order);
-        order_index_.emplace(resting_order.order_id,
-                             OrderLocator{resting_order.side, resting_order.price, std::prev(queue.end())});
-        return;
-    }
-
-    auto& queue = asks_[resting_order.price];
-    queue.push_back(resting_order);
-    order_index_.emplace(resting_order.order_id,
-                         OrderLocator{resting_order.side, resting_order.price, std::prev(queue.end())});
-}
-
-void OrderBook::append_trade(const WorkingOrder& incoming,
-                             const RestingOrder& resting,
-                             Quantity quantity,
-                             Price price,
-                             SubmitResult& result) {
-    Trade trade;
-    trade.trade_id = next_trade_id_++;
-    trade.price = price;
-    trade.quantity = quantity;
-    trade.aggressor_side = incoming.request.side;
-
-    if (incoming.request.side == Side::Buy) {
-        trade.buy_order_id = incoming.request.order_id;
-        trade.sell_order_id = resting.order_id;
+    if (level.tail != kNone) {
+        nodes_[level.tail].next = node_slot;
     } else {
-        trade.buy_order_id = resting.order_id;
-        trade.sell_order_id = incoming.request.order_id;
+        level.head = node_slot;
+    }
+    level.tail = node_slot;
+    ++level.order_count;
+    level.total_quantity += remaining;
+
+    index_.insert(order.order_id, node_slot);
+}
+
+void OrderBook::remove_resting(Slot node_slot) {
+    const OrderNode node = nodes_[node_slot];
+    PriceLevel& level = levels_[node.level];
+
+    if (node.prev != kNone) {
+        nodes_[node.prev].next = node.next;
+    } else {
+        level.head = node.next;
+    }
+    if (node.next != kNone) {
+        nodes_[node.next].prev = node.prev;
+    } else {
+        level.tail = node.prev;
+    }
+    level.total_quantity -= node.remaining;
+    --level.order_count;
+
+    index_.erase(node.order_id);
+    release_node(node_slot);
+    if (level.order_count == 0U) {
+        remove_level(node.level);
+    }
+}
+
+OrderBook::Slot OrderBook::find_or_create_level(Side side, Price price) {
+    Ladder& side_ladder = ladder(side);
+    if (!side_ladder.empty() && side_ladder.back().price == price) {
+        return side_ladder.back().level;  // joining the best price is the most common case
     }
 
-    result.trades.push_back(trade);
+    const auto position = ladder_lower_bound(side_ladder, side, price);
+    if (position != side_ladder.end() && position->price == price) {
+        return position->level;
+    }
+
+    const Slot level_slot = allocate_level();
+    levels_[level_slot] = PriceLevel{price, 0U, kNone, kNone, 0U, side};
+    side_ladder.insert(position, LadderEntry{price, level_slot});
+    return level_slot;
+}
+
+void OrderBook::remove_level(Slot level_slot) {
+    const PriceLevel& level = levels_[level_slot];
+    Ladder& side_ladder = ladder(level.side);
+
+    if (side_ladder.back().level == level_slot) {
+        side_ladder.pop_back();
+    } else {
+        side_ladder.erase(ladder_lower_bound(side_ladder, level.side, level.price));
+    }
+    release_level(level_slot);
+}
+
+OrderBook::Ladder::const_iterator OrderBook::find_ladder_entry(Side side, Price price) const {
+    const Ladder& side_ladder = ladder(side);
+    const auto position = ladder_lower_bound(side_ladder, side, price);
+    if (position != side_ladder.end() && position->price == price) {
+        return position;
+    }
+    return side_ladder.end();
+}
+
+void OrderBook::record_trade(const OrderRequest& aggressor, OrderId resting_order_id, Price price, Quantity quantity) {
+    const bool buyer_is_aggressor = aggressor.side == Side::Buy;
+    trades_.push_back(Trade{
+        next_trade_id_++,
+        buyer_is_aggressor ? aggressor.order_id : resting_order_id,
+        buyer_is_aggressor ? resting_order_id : aggressor.order_id,
+        price,
+        quantity,
+        aggressor.side,
+    });
+}
+
+OrderBook::Slot OrderBook::allocate_node() {
+    if (free_nodes_ != kNone) {
+        const Slot node_slot = free_nodes_;
+        free_nodes_ = nodes_[node_slot].next;
+        return node_slot;
+    }
+    if (nodes_.size() >= kNone) {
+        throw std::length_error("order book node pool exhausted");
+    }
+    nodes_.emplace_back();
+    return static_cast<Slot>(nodes_.size() - 1);
+}
+
+void OrderBook::release_node(Slot node_slot) noexcept {
+    nodes_[node_slot].next = free_nodes_;
+    free_nodes_ = node_slot;
+}
+
+OrderBook::Slot OrderBook::allocate_level() {
+    if (free_levels_ != kNone) {
+        const Slot level_slot = free_levels_;
+        free_levels_ = levels_[level_slot].tail;
+        return level_slot;
+    }
+    if (levels_.size() >= kNone) {
+        throw std::length_error("order book level pool exhausted");
+    }
+    levels_.emplace_back();
+    return static_cast<Slot>(levels_.size() - 1);
+}
+
+void OrderBook::release_level(Slot level_slot) noexcept {
+    levels_[level_slot].tail = free_levels_;
+    free_levels_ = level_slot;
 }
 
 }  // namespace tradematch
