@@ -18,12 +18,13 @@ namespace tradematch::testing {
 enum class OpKind : std::uint8_t {
     Submit,
     Cancel,
-    Replace
+    Replace,
+    ExpireDay
 };
 
 struct Operation {
     OpKind kind{OpKind::Submit};
-    OrderRequest order;  // Cancel only uses order.order_id.
+    OrderRequest order;  // Cancel only uses order.order_id; ExpireDay uses nothing.
 };
 
 inline Side opposite(Side side) noexcept {
@@ -42,9 +43,12 @@ inline std::string describe(const Operation& op) {
         case OpKind::Replace:
             out << "REPLACE ";
             break;
+        case OpKind::ExpireDay:
+            return "EXPIRE_DAY_ORDERS";
     }
     out << "id=" << op.order.order_id << ' ' << to_string(op.order.side) << ' ' << to_string(op.order.type)
-        << " qty=" << op.order.quantity << " price=" << op.order.price;
+        << " qty=" << op.order.quantity << " price=" << op.order.price << ' ' << to_string(op.order.time_in_force)
+        << (op.order.post_only ? " POST_ONLY" : "");
     return out.str();
 }
 
@@ -61,6 +65,8 @@ public:
         std::size_t rejections{0};
         std::size_t cancels{0};
         std::size_t replaces{0};
+        std::size_t amends_in_place{0};
+        std::size_t day_expiries{0};
         std::size_t max_resting_orders{0};
     };
 
@@ -85,7 +91,16 @@ public:
                 const auto result = engine_.replace(op.order);
                 mismatch = compare_replace(result, reference_.replace(op.order));
                 stats_.replaces += result.replaced ? 1U : 0U;
+                stats_.amends_in_place += result.priority_kept ? 1U : 0U;
                 stats_.trades += result.submit_result.trades.size();
+                break;
+            }
+            case OpKind::ExpireDay: {
+                const auto engine_expired = engine_.expire_day_orders();
+                if (engine_expired != reference_.expire_day_orders()) {
+                    mismatch = "expire_day_orders returned different order IDs";
+                }
+                stats_.day_expiries += engine_expired.size();
                 break;
             }
         }
@@ -100,6 +115,10 @@ public:
 
     const Stats& stats() const noexcept {
         return stats_;
+    }
+
+    const ReferenceBook& reference() const noexcept {
+        return reference_;
     }
 
 private:
@@ -257,7 +276,8 @@ private:
         }
         if (engine_order && reference_order &&
             (engine_order->remaining_quantity != reference_order->remaining_quantity ||
-             engine_order->price != reference_order->price || engine_order->sequence != reference_order->sequence)) {
+             engine_order->price != reference_order->price || engine_order->sequence != reference_order->sequence ||
+             engine_order->time_in_force != reference_order->time_in_force)) {
             return "get_order view differs for id " + std::to_string(touched_order_id);
         }
         return {};
@@ -269,20 +289,27 @@ private:
 };
 
 // Produces adversarial order flow: a narrow price band so orders cross constantly, small quantities so
-// partial fills are common, plus a steady trickle of invalid, duplicate, and unknown-ID requests.
+// partial fills are common, every time-in-force and post-only combination, replacements that sometimes amend in
+// place, end-of-day expiries, and a steady trickle of invalid, duplicate, and unknown-ID requests. The reference
+// book is consulted only to aim replacements at an order's current price and size.
 class OperationGenerator {
 public:
     explicit OperationGenerator(std::uint64_t seed) : rng_(seed) {}
 
-    Operation next() {
-        const auto roll = uniform(0, 99);
-        if (roll < 55 || recent_ids_.empty()) {
+    Operation next(const ReferenceBook& book) {
+        const auto roll = uniform(0, 199);
+        if (roll == 0) {
+            Operation op;
+            op.kind = OpKind::ExpireDay;
+            return op;
+        }
+        if (roll < 110 || recent_ids_.empty()) {
             return make_submit();
         }
-        if (roll < 85) {
+        if (roll < 170) {
             return make_cancel();
         }
-        return make_replace();
+        return make_replace(book);
     }
 
 private:
@@ -312,6 +339,25 @@ private:
         return uniform(0, 99) == 0 ? 0U : static_cast<Quantity>(uniform(1, 50));
     }
 
+    // Mostly the resting kinds a replace accepts, with an occasional IOC or FOK to exercise its rejection.
+    TimeInForce pick_replacement_time_in_force() {
+        if (uniform(0, 9) == 0) {
+            return pick_time_in_force();
+        }
+        return uniform(0, 3) == 0 ? TimeInForce::Day : TimeInForce::GoodTillCancel;
+    }
+
+    TimeInForce pick_time_in_force() {
+        const auto roll = uniform(0, 99);
+        if (roll < 60) {
+            return TimeInForce::GoodTillCancel;
+        }
+        if (roll < 75) {
+            return TimeInForce::Day;
+        }
+        return roll < 90 ? TimeInForce::ImmediateOrCancel : TimeInForce::FillOrKill;
+    }
+
     Operation make_submit() {
         Operation op;
         op.kind = OpKind::Submit;
@@ -329,6 +375,8 @@ private:
         op.order.type = uniform(0, 9) == 0 ? OrderType::Market : OrderType::Limit;
         op.order.quantity = pick_quantity();
         op.order.price = pick_price(op.order.type);
+        op.order.time_in_force = pick_time_in_force();
+        op.order.post_only = uniform(0, 9) == 0;
         remember(op.order);
         return op;
     }
@@ -340,7 +388,7 @@ private:
         return op;
     }
 
-    Operation make_replace() {
+    Operation make_replace(const ReferenceBook& book) {
         Operation op;
         op.kind = OpKind::Replace;
         op.order.order_id = uniform(0, 19) == 0 ? next_id_ + 1000 : pick_recent_id();
@@ -352,6 +400,15 @@ private:
         op.order.type = uniform(0, 19) == 0 ? OrderType::Market : OrderType::Limit;
         op.order.quantity = pick_quantity();
         op.order.price = pick_price(op.order.type);
+        op.order.time_in_force = pick_replacement_time_in_force();
+        op.order.post_only = uniform(0, 9) == 0;
+
+        // Half of the replacements keep the current price with the same or a smaller size: the in-place amend path.
+        const auto current = book.get_order(op.order.order_id);
+        if (current && op.order.type == OrderType::Limit && uniform(0, 1) == 0) {
+            op.order.price = current->price;
+            op.order.quantity = static_cast<Quantity>(uniform(1, current->remaining_quantity));
+        }
         return op;
     }
 
@@ -397,6 +454,10 @@ public:
         op.order.type = (flags & 0x0EU) == 0U ? OrderType::Market : OrderType::Limit;
         op.order.quantity = static_cast<Quantity>(byte() % 64);
 
+        const auto extras = byte();
+        op.order.time_in_force = static_cast<TimeInForce>(extras & 3U);
+        op.order.post_only = (extras & 0x1CU) == 0U;
+
         const auto price_byte = byte();
         if (op.order.type == OrderType::Market) {
             op.order.price = (flags & 0x10U) != 0U && price_byte < 8 ? 10000 : 0;
@@ -415,7 +476,7 @@ private:
         if (selector < 208) {
             return OpKind::Cancel;
         }
-        return OpKind::Replace;
+        return selector < 250 ? OpKind::Replace : OpKind::ExpireDay;
     }
 
     std::uint8_t byte() noexcept {

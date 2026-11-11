@@ -27,6 +27,21 @@ const char* to_string(OrderType type) noexcept {
     return "UNKNOWN";
 }
 
+const char* to_string(TimeInForce time_in_force) noexcept {
+    switch (time_in_force) {
+        case TimeInForce::GoodTillCancel:
+            return "GTC";
+        case TimeInForce::Day:
+            return "DAY";
+        case TimeInForce::ImmediateOrCancel:
+            return "IOC";
+        case TimeInForce::FillOrKill:
+            return "FOK";
+    }
+
+    return "UNKNOWN";
+}
+
 const char* to_string(RejectReason reason) noexcept {
     switch (reason) {
         case RejectReason::None:
@@ -45,6 +60,12 @@ const char* to_string(RejectReason reason) noexcept {
             return "SIDE_CHANGE";
         case RejectReason::TypeChange:
             return "TYPE_CHANGE";
+        case RejectReason::InvalidTimeInForce:
+            return "INVALID_TIME_IN_FORCE";
+        case RejectReason::InvalidPostOnly:
+            return "INVALID_POST_ONLY";
+        case RejectReason::PostOnlyWouldCross:
+            return "POST_ONLY_WOULD_CROSS";
     }
 
     return "UNKNOWN";

@@ -84,6 +84,8 @@ void expect_book_invariants(const tradematch::OrderBook& book) {
                              order.remaining_quantity,
                              "Order quantity should match the indexed view.");
                 expect_equal(indexed_order.sequence, order.sequence, "Order sequence should match the indexed view.");
+                expect(indexed_order.time_in_force == order.time_in_force,
+                       "Order time in force should match the indexed view.");
 
                 if (has_previous_sequence) {
                     expect(previous_sequence < order.sequence, "Order sequence should increase within a price level.");
@@ -269,8 +271,10 @@ void test_replace_order_resets_time_priority() {
     submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 40, 10000});
     submit_checked(book, {2, tradematch::Side::Buy, tradematch::OrderType::Limit, 40, 10000});
 
-    const auto replace = replace_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 40, 10000});
+    // Increasing the quantity is a new order for priority purposes.
+    const auto replace = replace_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 60, 10000});
     expect(replace.replaced, "Replace should succeed for an active order.");
+    expect(!replace.priority_kept, "A larger quantity should lose time priority.");
     expect_equal(replace.previous_remaining_quantity,
                  tradematch::Quantity{40},
                  "Replace should report the previous resting quantity.");
@@ -288,8 +292,154 @@ void test_replace_order_resets_time_priority() {
     const auto remaining_order =
         expect_value(book.get_order(1), "Replaced order should still be resting with remaining quantity.");
     expect_equal(remaining_order.remaining_quantity,
-                 tradematch::Quantity{30},
+                 tradematch::Quantity{50},
                  "Replace scenario should leave the expected remainder.");
+}
+
+void test_amend_down_keeps_time_priority() {
+    tradematch::OrderBook book;
+
+    submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10000});
+    submit_checked(book, {2, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10000});
+    const auto original_sequence = expect_value(book.get_order(1), "Order 1 should rest.").sequence;
+
+    const auto amend = replace_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 30, 10000});
+    expect(amend.replaced && amend.priority_kept, "Reducing quantity at the same price should amend in place.");
+    expect_equal(amend.previous_remaining_quantity, tradematch::Quantity{100}, "The old quantity should be reported.");
+    expect(amend.submit_result.trades.empty(), "An in-place amend never trades.");
+
+    const auto amended = expect_value(book.get_order(1), "The amended order should still rest.");
+    expect_equal(amended.remaining_quantity, tradematch::Quantity{30}, "The quantity should be reduced.");
+    expect_equal(amended.sequence, original_sequence, "The sequence number should be unchanged.");
+    expect_equal(book.snapshot().bids.front().total_quantity,
+                 tradematch::Volume{130},
+                 "The level total should reflect the reduction.");
+
+    const auto fill = submit_checked(book, {3, tradematch::Side::Sell, tradematch::OrderType::Limit, 40, 10000});
+    expect_equal(fill.trades.front().buy_order_id,
+                 tradematch::OrderId{1},
+                 "The amended order should still fill first.");
+    expect_equal(fill.trades.front().quantity, tradematch::Quantity{30}, "It should fill its reduced quantity.");
+
+    const auto same = replace_checked(book, {2, tradematch::Side::Buy, tradematch::OrderType::Limit, 90, 10000});
+    expect(same.priority_kept, "Re-stating the same quantity at the same price keeps priority.");
+
+    const auto moved = replace_checked(book, {2, tradematch::Side::Buy, tradematch::OrderType::Limit, 10, 9990});
+    expect(moved.replaced && !moved.priority_kept, "A price change should lose priority even when shrinking.");
+}
+
+void test_immediate_or_cancel_never_rests() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Sell, OrderType::Limit, 30, 10000});
+    submit_checked(book, {2, Side::Sell, OrderType::Limit, 30, 10100});
+
+    const auto partial =
+        submit_checked(book, {3, Side::Buy, OrderType::Limit, 50, 10000, TimeInForce::ImmediateOrCancel});
+    expect(partial.accepted && partial.expired && !partial.rested, "IOC remainders should be cancelled.");
+    expect_equal(partial.filled_quantity, tradematch::Quantity{30}, "IOC should trade what its limit allows.");
+    expect_equal(partial.remaining_quantity, tradematch::Quantity{20}, "The cancelled remainder should be reported.");
+    expect(!book.has_order(3), "IOC orders never rest.");
+
+    const auto none = submit_checked(book, {4, Side::Buy, OrderType::Limit, 10, 10050, TimeInForce::ImmediateOrCancel});
+    expect(none.expired && none.trades.empty(), "An IOC with nothing to trade should simply expire.");
+    expect_equal(book.order_count(), std::size_t{1}, "Only the untouched ask should remain.");
+}
+
+void test_fill_or_kill_is_all_or_nothing() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Sell, OrderType::Limit, 30, 10000});
+    submit_checked(book, {2, Side::Sell, OrderType::Limit, 30, 10050});
+    submit_checked(book, {3, Side::Sell, OrderType::Limit, 30, 10100});
+
+    const auto killed = submit_checked(book, {4, Side::Buy, OrderType::Limit, 70, 10050, TimeInForce::FillOrKill});
+    expect(killed.accepted && killed.expired, "A FOK that cannot fill in full should be killed.");
+    expect(killed.trades.empty() && killed.filled_quantity == 0U, "A killed FOK must not trade at all.");
+    expect_equal(book.order_count(), std::size_t{3}, "A killed FOK must leave the book untouched.");
+
+    const auto filled = submit_checked(book, {5, Side::Buy, OrderType::Limit, 60, 10050, TimeInForce::FillOrKill});
+    expect(!filled.expired && filled.filled_quantity == 60U, "A FOK covered by its limit should fill completely.");
+    expect_equal(filled.trades.size(), std::size_t{2}, "It may sweep several levels.");
+
+    const auto market_kill = submit_checked(book, {6, Side::Buy, OrderType::Market, 31, 0, TimeInForce::FillOrKill});
+    expect(market_kill.expired && market_kill.trades.empty(), "Market FOK orders are all-or-nothing too.");
+    const auto market_fill = submit_checked(book, {7, Side::Buy, OrderType::Market, 30, 0, TimeInForce::FillOrKill});
+    expect_equal(market_fill.filled_quantity, tradematch::Quantity{30}, "A coverable market FOK fills.");
+    expect_equal(book.order_count(), std::size_t{0}, "All liquidity should be consumed.");
+}
+
+void test_post_only_never_takes_liquidity() {
+    using tradematch::OrderType;
+    using tradematch::RejectReason;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Sell, OrderType::Limit, 10, 10100});
+
+    const auto rests =
+        submit_checked(book, {2, Side::Buy, OrderType::Limit, 10, 10000, TimeInForce::GoodTillCancel, true});
+    expect(rests.rested, "A non-crossing post-only order should rest.");
+
+    const auto crossing =
+        submit_checked(book, {3, Side::Buy, OrderType::Limit, 10, 10100, TimeInForce::GoodTillCancel, true});
+    expect(!crossing.accepted && crossing.reject_reason == RejectReason::PostOnlyWouldCross,
+           "A crossing post-only order should be rejected.");
+    expect(crossing.trades.empty(), "A rejected post-only order must not trade.");
+
+    const auto with_ioc =
+        submit_checked(book, {4, Side::Buy, OrderType::Limit, 10, 9900, TimeInForce::ImmediateOrCancel, true});
+    expect(with_ioc.reject_reason == RejectReason::InvalidPostOnly, "Post-only IOC orders are contradictory.");
+    const auto as_market =
+        submit_checked(book, {5, Side::Buy, OrderType::Market, 10, 0, TimeInForce::GoodTillCancel, true});
+    expect(as_market.reject_reason == RejectReason::InvalidPostOnly, "Post-only market orders are contradictory.");
+
+    const auto replace_cross =
+        replace_checked(book, {2, Side::Buy, OrderType::Limit, 10, 10100, TimeInForce::GoodTillCancel, true});
+    expect(replace_cross.reject_reason == RejectReason::PostOnlyWouldCross,
+           "A post-only replacement that would cross is rejected.");
+    expect_equal(expect_value(book.get_order(2), "The original must survive.").price,
+                 tradematch::Price{10000},
+                 "A rejected replacement leaves the original order untouched.");
+}
+
+void test_replace_requires_a_resting_time_in_force() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10000});
+
+    const auto ioc = replace_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10010, TimeInForce::ImmediateOrCancel});
+    expect(ioc.reject_reason == tradematch::RejectReason::InvalidTimeInForce, "Replacements must be able to rest.");
+
+    const auto to_day = replace_checked(book, {1, Side::Buy, OrderType::Limit, 5, 10000, TimeInForce::Day});
+    expect(to_day.priority_kept, "Switching to DAY while shrinking is still an in-place amend.");
+    expect(expect_value(book.get_order(1), "Order 1 should rest.").time_in_force == TimeInForce::Day,
+           "The amended time in force should be visible.");
+}
+
+void test_day_orders_expire_at_end_of_day() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, {5, Side::Buy, OrderType::Limit, 10, 10000, TimeInForce::Day});
+    submit_checked(book, {2, Side::Buy, OrderType::Limit, 10, 10000});
+    submit_checked(book, {9, Side::Sell, OrderType::Limit, 10, 10100, TimeInForce::Day});
+    submit_checked(book, {4, Side::Sell, OrderType::Limit, 10, 10200});
+    submit_checked(book, {7, Side::Buy, OrderType::Limit, 10, 9900, TimeInForce::Day});
+
+    const auto expired = book.expire_day_orders();
+    expect_book_invariants(book);
+    expect(expired == std::vector<tradematch::OrderId>{5, 7, 9}, "DAY orders should expire in ascending ID order.");
+    expect_equal(book.order_count(), std::size_t{2}, "GTC orders survive the end of day.");
+    expect_equal(book.level_count(Side::Buy), std::size_t{1}, "Emptied levels should be removed.");
+    expect(book.expire_day_orders().empty(), "A second expiry finds nothing.");
 }
 
 void test_replace_rejects_invalid_request_without_removing_resting_order() {
@@ -473,7 +623,18 @@ void test_formatting_helpers() {
         {RejectReason::UnknownOrder, "UNKNOWN_ORDER"},
         {RejectReason::SideChange, "SIDE_CHANGE"},
         {RejectReason::TypeChange, "TYPE_CHANGE"},
+        {RejectReason::InvalidTimeInForce, "INVALID_TIME_IN_FORCE"},
+        {RejectReason::InvalidPostOnly, "INVALID_POST_ONLY"},
+        {RejectReason::PostOnlyWouldCross, "POST_ONLY_WOULD_CROSS"},
     };
+    for (const auto& [tif, name] : std::vector<std::pair<tradematch::TimeInForce, std::string>>{
+             {tradematch::TimeInForce::GoodTillCancel, "GTC"},
+             {tradematch::TimeInForce::Day, "DAY"},
+             {tradematch::TimeInForce::ImmediateOrCancel, "IOC"},
+             {tradematch::TimeInForce::FillOrKill, "FOK"},
+         }) {
+        expect_equal(std::string{tradematch::to_string(tif)}, name, "Time-in-force names should be stable.");
+    }
     for (const auto& [reason, name] : reasons) {
         expect_equal(std::string{tradematch::to_string(reason)}, name, "Reject reason names should be stable.");
     }
@@ -506,6 +667,12 @@ int run_all_tests() {
         {"market_order_expires_after_available_liquidity", test_market_order_expires_after_available_liquidity},
         {"invalid_and_duplicate_orders_are_rejected", test_invalid_and_duplicate_orders_are_rejected},
         {"replace_order_resets_time_priority", test_replace_order_resets_time_priority},
+        {"amend_down_keeps_time_priority", test_amend_down_keeps_time_priority},
+        {"immediate_or_cancel_never_rests", test_immediate_or_cancel_never_rests},
+        {"fill_or_kill_is_all_or_nothing", test_fill_or_kill_is_all_or_nothing},
+        {"post_only_never_takes_liquidity", test_post_only_never_takes_liquidity},
+        {"replace_requires_a_resting_time_in_force", test_replace_requires_a_resting_time_in_force},
+        {"day_orders_expire_at_end_of_day", test_day_orders_expire_at_end_of_day},
         {"replace_rejects_invalid_request_without_removing_resting_order",
          test_replace_rejects_invalid_request_without_removing_resting_order},
         {"replace_rejects_side_change", test_replace_rejects_side_change},

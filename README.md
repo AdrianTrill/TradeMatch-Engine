@@ -23,11 +23,13 @@ This is the kind of systems problem that rewards precision more than size. A mat
 
 - Limit orders
 - Market orders
+- Time in force: GTC, DAY (with end-of-day expiry), IOC, and FOK
+- Post-only orders that are rejected rather than take liquidity
 - Partial fills
 - Price-time priority
 - Trade execution reporting
 - Cancel by order ID
-- Replace by order ID
+- Replace by order ID, keeping time priority when only the quantity goes down
 - Resting-order lookup by order ID
 - Machine-readable reject reasons for every rejected request
 - Zero heap allocations on the request path once capacity is reserved
@@ -39,7 +41,8 @@ Core public API:
 
 - `submit(OrderRequest)` submits a new order and returns fills, remaining quantity, and any generated trades.
 - `cancel(OrderId)` removes a resting order by ID and reports the cancelled quantity.
-- `replace(OrderRequest)` validates, cancels, and resubmits an active order using the same ID. The replacement must keep the resting order's side and limit type.
+- `replace(OrderRequest)` modifies an active order. At the same price with the same or a smaller quantity, it amends in place and keeps time priority (`priority_kept`). Otherwise it cancels and resubmits under the same ID. The replacement must keep the side and the limit type, and use a time in force that can rest. Its quantity is the new open quantity.
+- `expire_day_orders()` runs end-of-day processing: it cancels every resting DAY order and returns their IDs.
 - `get_order(OrderId)` returns the current resting state for an active order.
 - `get_orders_at_level(Side, Price)` exposes FIFO order state for a price level.
 - `best_bid()` / `best_ask()` return the top of book, and `level_count(Side)` the number of price levels.
@@ -72,10 +75,13 @@ The engine follows standard price-time priority:
 - Sell orders match the highest available bid first.
 - At the same price level, older resting orders fill before newer ones.
 - Trades execute at the resting order's price.
-- Market orders consume available liquidity and never rest in the book.
-- Unfilled market quantity expires immediately.
-- Replace is implemented as cancel plus resubmit, so the replaced order loses its original time priority.
-- Replace may change price and quantity, but never the side or the limit order type; such requests are rejected and the resting order is left untouched.
+- Market orders consume available liquidity and never rest in the book. Unfilled market quantity expires immediately.
+- IOC orders trade what they can at their limit, and any remainder is cancelled instead of resting.
+- FOK orders trade their full quantity immediately or do nothing. The engine sums level totals across the crossing price range before touching the book, so a killed FOK leaves no trace.
+- Post-only orders are rejected with `PostOnlyWouldCross` if they would take liquidity. They must be limit orders with a time in force that can rest.
+- DAY orders behave like GTC until `expire_day_orders()` runs.
+- Replace keeps time priority when it only reduces quantity at the same price, as exchanges do, because a smaller order cannot disadvantage the orders queued behind it. A price change or a larger quantity is cancel plus resubmit, so the order moves to the back of the queue at its new price.
+- Replace may never change the side or the limit order type, or move to IOC or FOK. Rejected requests leave the resting order untouched.
 - Aggregated quantities (price-level totals) are 64-bit, so they never overflow even when many large orders share a level.
 
 ## System Design
@@ -119,7 +125,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 - The original engine (`std::map` levels, `std::list` queues, `std::unordered_map` index) is kept in [bench/baseline](bench/baseline) as the "before" in benchmarks. It was easy to read but allocated 1.83 times per operation, and those allocations dominated its tail latency.
 - Sorted vectors beat trees for price levels because books are shallow and activity concentrates near the touch. The worst case (a new level deep in a very wide book) costs a short `memmove`, never an allocation.
 - Returning trades as a span trades a small amount of API convenience (the view is invalidated by the next call) for zero allocations per request.
-- Replace is intentionally modeled as validate, cancel, and resubmit. That keeps the implementation simple and makes the priority reset explicit instead of hiding it.
+- Replace has two paths with explicit priority semantics. An in-place amend is O(1) and keeps the queue position. A price change or a size increase is cancel plus resubmit, which is easy to reason about and makes the priority reset visible in the result (`priority_kept`).
 
 ## Repository Layout
 
@@ -239,47 +245,41 @@ ctest --test-dir build --output-on-failure
 
 ## Example Workflow
 
-The demo executable walks through a simple deterministic scenario:
+The demo executable (`./build/tradematch_demo`) walks through a deterministic scenario:
 
-1. Two buy limit orders rest at the same price.
-2. One order is replaced with the same price but a new quantity, which resets its time priority.
-3. A sell limit order matches the two bids in FIFO order after the replace.
-4. A sell limit order rests on the ask side.
-5. A buy market order consumes part of that liquidity.
-6. The remaining ask is cancelled by order ID.
-
-The output shows:
-
-- whether the order was accepted
-- whether a replace succeeded and how much quantity it replaced
-- how much filled
-- whether any remainder rested or expired
-- generated trades with buy/sell IDs, price, quantity, and aggressor side
-- a book snapshot after each step
-
-Sample demo requests:
-
-```text
-BUY  LIMIT  id=1 qty=100 price=100.50
-BUY  LIMIT  id=2 qty=60  price=100.50
-REPLACE     id=1 qty=80  price=100.50
-SELL LIMIT  id=3 qty=120 price=100.50
-SELL LIMIT  id=4 qty=50  price=101.00
-BUY  MARKET id=5 qty=40
-CANCEL      id=4
-```
+1. Two buy limit orders rest at 100.50.
+2. Order 1 is reduced from 100 to 80 at the same price. It is amended in place and keeps its place at the front of the queue.
+3. A sell order for 120 fills order 1 first (80), then order 2 (40).
+4. A post-only ask rests at 101.00, and a post-only bid at 101.00 is rejected instead of trading.
+5. A fill-or-kill bid for 80 is killed because only 50 is offered, and nothing trades.
+6. A market order takes 40, and an IOC bid for 30 takes the last 10. Its remaining 20 is cancelled.
+7. The leftover bid is cancelled by order ID.
 
 Sample output excerpt:
 
 ```text
-Replace order 1
-  replaced=true previous_remaining=100
-  Order replaced and re-entered the book with a new priority timestamp.
-  accepted=true filled=0 remaining=80 rested=true expired=false
+Replace order 1 side=BUY type=LIMIT qty=80 price=100.50
+  replaced=true priority_kept=true previous_remaining=100
+  Order quantity reduced in place; time priority kept.
 
 Submit order 3 side=SELL type=LIMIT qty=120 price=100.50
-  trade#1 buy=2 sell=3 qty=60 price=100.50 aggressor=SELL
-  trade#2 buy=1 sell=3 qty=60 price=100.50 aggressor=SELL
+  accepted=true filled=120 remaining=0 rested=false expired=false
+  Order fully filled.
+  trade#1 buy=1 sell=3 qty=80 price=100.50 aggressor=SELL
+  trade#2 buy=2 sell=3 qty=40 price=100.50 aggressor=SELL
+
+Submit order 5 side=BUY type=LIMIT qty=10 price=101.00 post_only
+  accepted=false filled=0 remaining=10 rested=false expired=false reject=POST_ONLY_WOULD_CROSS
+  Post-only order would take liquidity and was rejected.
+
+Submit order 6 side=BUY type=LIMIT qty=80 price=101.00 tif=FOK
+  accepted=true filled=0 remaining=80 rested=false expired=true
+  Fill-or-kill order could not be filled in full and was cancelled.
+
+Submit order 8 side=BUY type=LIMIT qty=30 price=101.00 tif=IOC
+  accepted=true filled=10 remaining=20 rested=false expired=true
+  Immediate-or-cancel order filled what it could; the remainder was cancelled.
+  trade#4 buy=8 sell=4 qty=10 price=101.00 aggressor=BUY
 ```
 
 ## Tests Included
@@ -302,6 +302,11 @@ The test suite covers deterministic scenarios that matter for correctness:
 - price formatting at the extremes of the 64-bit range
 - best bid / best ask tracking as levels are consumed and cancelled
 - reject reasons for every validation failure, unknown order, and illegal replace
+- amend-down keeping time priority, including the level total and sequence number
+- IOC partial fills and empty IOCs never resting
+- FOK all-or-nothing across multiple levels, for limit and market orders
+- post-only resting, rejection when crossing, invalid post-only combinations, and crossing post-only replacements
+- DAY expiry returning IDs in order and removing emptied levels, while GTC orders survive
 - a book that starts with room for one order, one level, and one trade, then grows transparently through a 1,000-trade sweep
 - invariant checks after every submit, cancel, and replace
 
@@ -321,7 +326,19 @@ Hand-written scenarios only cover the cases someone thought of. To catch the res
 - **Randomized differential test** (`tradematch_differential_tests`): runs 400,000 adversarial operations (200 seeds x 2,000) through both books. The flow uses a narrow price band so orders constantly cross, small sizes so partial fills are common, and a steady stream of invalid, duplicate, and unknown-ID requests. After every operation it compares result flags, quantities, every trade field, the full depth snapshot including FIFO order IDs, and order lookups. A failure prints the seed, the diverging operation, and a one-line reproduction command.
 - **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow and aborts on the first engine/reference mismatch. CI fuzzes it for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps the target compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
 
-The harness has been checked by mutation testing. Each of these injected bugs is caught within the first 63 operations: trading at the aggressor's price, an off-by-one in the limit-price check, and LIFO instead of FIFO queue order.
+The random flow covers every time-in-force and post-only combination. Half of all replacements target an order's current price with the same or a smaller size, to exercise in-place amends, and end-of-day expiries are interleaved, with the expired ID lists compared.
+
+The harness has been checked by mutation testing. Each injected bug was caught within the first 1,000 operations, most within a few hundred:
+
+- trading at the aggressor's price
+- an off-by-one in the limit-price check
+- LIFO instead of FIFO queue order
+- killing a FOK that exactly fits
+- a same-size amend losing priority
+- an amend that forgets to update the level total
+- a post-only replacement allowed to cross
+- day expiry also removing GTC orders
+- an IOC remainder that rests
 
 ```bash
 make test        # unit tests + 400k-operation differential test + fuzz smoke test
@@ -391,10 +408,9 @@ Every push runs two workflows:
 
 For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It shows the ability to take a compact but failure-prone codebase and turn it into a cleaner, testable engine with explicit trade-offs, measurable behavior, and documentation that matches reality.
 
-It is also a strong stepping stone for deeper systems work: market data fan-out, persistence, order modification, IOC/FOK handling, or a lock-aware ingress layer around the matching core.
+It is also a strong stepping stone for deeper systems work: market data fan-out, persistence, or a lock-aware ingress layer around the matching core.
 
 ## Future Improvements
 
-- IOC/FOK and post-only order policies
 - Snapshot serialization and replayable input streams
 - Market data feed generation from execution events

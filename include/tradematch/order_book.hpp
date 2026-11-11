@@ -23,6 +23,9 @@ struct BookCapacity {
 
 // Price-time-priority limit order book for a single instrument.
 //
+// Order handling: limit and market orders; GTC, DAY, IOC, and FOK time in force; post-only orders that are rejected
+// rather than take liquidity; and replace, which keeps time priority when only the quantity goes down.
+//
 // All storage is index based and reused:
 // - Resting orders live in a pooled array and form an intrusive FIFO list per price level.
 // - Each side keeps its price levels in a vector sorted so the best price is at the back. Taking or removing the best
@@ -37,6 +40,9 @@ public:
     SubmitResult submit(const OrderRequest& order);
     CancelResult cancel(OrderId order_id);
     ReplaceResult replace(const OrderRequest& replacement);
+
+    // End-of-day processing: cancels every resting DAY order and returns their IDs in ascending order.
+    std::vector<OrderId> expire_day_orders();
 
     bool has_order(OrderId order_id) const noexcept;
     std::optional<RestingOrderView> get_order(OrderId order_id) const;
@@ -65,6 +71,7 @@ private:
         Slot prev{kNone};
         Slot next{kNone};  // also links free nodes
         Side side{Side::Buy};
+        TimeInForce time_in_force{TimeInForce::GoodTillCancel};
     };
 
     struct PriceLevel {
@@ -98,6 +105,8 @@ private:
 
     Rejection validate(const OrderRequest& order, bool replacing) const noexcept;
     void execute(const OrderRequest& order, SubmitResult& result);
+    bool would_cross(const OrderRequest& order) const noexcept;
+    Volume available_liquidity(const OrderRequest& order) const noexcept;
     void match(const OrderRequest& order, Quantity& remaining);
     void rest(const OrderRequest& order, Quantity remaining, SequenceNumber sequence);
     void remove_resting(Slot node_slot);

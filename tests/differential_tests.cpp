@@ -67,7 +67,7 @@ int run(int argc, char** argv) {
         std::deque<Operation> history;
 
         for (std::uint64_t index = 0; index < options.operations; ++index) {
-            const auto op = generator.next();
+            const auto op = generator.next(harness.reference());
             history.push_back(op);
             if (history.size() > 12U) {
                 history.pop_front();
@@ -92,6 +92,8 @@ int run(int argc, char** argv) {
         totals.rejections += stats.rejections;
         totals.cancels += stats.cancels;
         totals.replaces += stats.replaces;
+        totals.amends_in_place += stats.amends_in_place;
+        totals.day_expiries += stats.day_expiries;
         totals.max_resting_orders = std::max(totals.max_resting_orders, stats.max_resting_orders);
     }
 
@@ -99,6 +101,7 @@ int run(int argc, char** argv) {
               << options.seeds << " seeds x " << options.operations << ")\n"
               << "       trades=" << totals.trades << " rejections=" << totals.rejections
               << " cancels=" << totals.cancels << " replaces=" << totals.replaces
+              << " amends_in_place=" << totals.amends_in_place << " day_expiries=" << totals.day_expiries
               << " max_resting_orders=" << totals.max_resting_orders << '\n';
     return 0;
 }
