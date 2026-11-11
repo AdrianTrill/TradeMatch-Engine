@@ -53,6 +53,15 @@ add_library(tradematch_engine ${TRADEMATCH_ENGINE_SOURCES})
 target_include_directories(tradematch_engine PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(tradematch_engine PRIVATE tradematch_project_options)
 
+add_library(tradematch_sim src/simulator.cpp)
+target_link_libraries(tradematch_sim PUBLIC tradematch_engine PRIVATE tradematch_project_options)
+# A fused multiply-add rounds differently from a separate multiply and add, so the simulator disables contraction to
+# replay a seed identically on every CPU. MSVC does not contract by default.
+target_compile_options(tradematch_sim PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-ffp-contract=off>)
+
+add_executable(tradematch_tui tools/tui_main.cpp)
+target_link_libraries(tradematch_tui PRIVATE tradematch_sim tradematch_project_options)
+
 add_executable(tradematch_demo tools/demo_main.cpp)
 target_link_libraries(tradematch_demo PRIVATE tradematch_engine tradematch_project_options)
 
@@ -74,6 +83,11 @@ if(BUILD_TESTING)
     target_include_directories(tradematch_market_data_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
     target_link_libraries(tradematch_market_data_tests PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_market_data_tests COMMAND tradematch_market_data_tests)
+
+    add_executable(tradematch_simulator_tests tests/simulator_tests.cpp)
+    target_link_libraries(tradematch_simulator_tests PRIVATE tradematch_sim tradematch_project_options)
+    add_test(NAME tradematch_simulator_tests COMMAND tradematch_simulator_tests)
+    add_test(NAME tradematch_tui_smoke COMMAND tradematch_tui --frames 60 --speed 4 --no-sleep --headless)
 
     add_executable(tradematch_order_index_tests tests/order_index_tests.cpp)
     target_link_libraries(tradematch_order_index_tests PRIVATE tradematch_engine tradematch_project_options)

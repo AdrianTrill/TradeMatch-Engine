@@ -1,5 +1,5 @@
-#include "latency_histogram.hpp"
 #include "system_info.hpp"
+#include "tradematch/latency_histogram.hpp"
 #include "workload.hpp"
 
 #include "baseline/map_order_book.hpp"
@@ -27,11 +27,11 @@
 
 namespace {
 
+using tradematch::LatencyHistogram;
 using tradematch::bench::Command;
 using tradematch::bench::CommandKind;
 using tradematch::bench::kCommandKindCount;
 using tradematch::bench::kCommandKindNames;
-using tradematch::bench::LatencyHistogram;
 using tradematch::bench::Workload;
 using tradematch::bench::WorkloadConfig;
 using Clock = std::chrono::steady_clock;

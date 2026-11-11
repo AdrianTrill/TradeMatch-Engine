@@ -1,4 +1,4 @@
-#include "latency_histogram.hpp"
+#include "tradematch/latency_histogram.hpp"
 #include "workload.hpp"
 
 #include "tradematch/order_book.hpp"
@@ -18,8 +18,8 @@
 
 namespace {
 
+using tradematch::LatencyHistogram;
 using tradematch::bench::CommandKind;
-using tradematch::bench::LatencyHistogram;
 using tradematch::bench::WorkloadConfig;
 
 class TestFailure : public std::runtime_error {

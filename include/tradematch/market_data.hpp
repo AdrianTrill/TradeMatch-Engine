@@ -85,6 +85,11 @@ private:
     std::vector<Candle> candles_;
 };
 
+struct TapeEntry {
+    Timestamp timestamp{};
+    Trade trade{};
+};
+
 // One sequenced market data message, as a feed handler downstream of the engine would receive it.
 struct FeedMessage {
     enum class Kind : std::uint8_t {
@@ -122,7 +127,7 @@ public:
 
     const DepthBook& depth(SymbolId symbol) const;
     TopOfBook top_of_book(SymbolId symbol) const;
-    const std::deque<Trade>& recent_trades(SymbolId symbol) const;
+    const std::deque<TapeEntry>& recent_trades(SymbolId symbol) const;
     const CandleSeries& candles(SymbolId symbol) const;
     std::optional<Price> last_price(SymbolId symbol) const;
     Volume traded_volume(SymbolId symbol) const;
@@ -141,7 +146,7 @@ private:
 
         DepthBook depth;
         CandleSeries candles;
-        std::deque<Trade> tape;
+        std::deque<TapeEntry> tape;
         std::optional<Price> last_price;
         Volume volume{};
         long double notional{};

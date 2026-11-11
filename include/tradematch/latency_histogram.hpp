@@ -1,5 +1,5 @@
-#ifndef TRADEMATCH_BENCH_LATENCY_HISTOGRAM_HPP
-#define TRADEMATCH_BENCH_LATENCY_HISTOGRAM_HPP
+#ifndef TRADEMATCH_LATENCY_HISTOGRAM_HPP
+#define TRADEMATCH_LATENCY_HISTOGRAM_HPP
 
 #include <algorithm>
 #include <array>
@@ -8,7 +8,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace tradematch::bench {
+namespace tradematch {
 
 // Log-linear latency histogram in the spirit of HdrHistogram. Values below 256 ns are recorded exactly; above that,
 // every power-of-two range is split into 128 linear sub-buckets, so any reported percentile is within 1/128 (0.8%)
@@ -122,6 +122,6 @@ private:
     std::uint64_t max_{0};
 };
 
-}  // namespace tradematch::bench
+}  // namespace tradematch
 
 #endif

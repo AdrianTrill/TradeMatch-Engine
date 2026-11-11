@@ -10,6 +10,11 @@ TradeMatch Engine is a compact C++ order matching engine built to demonstrate th
 
 Prices are represented as integer ticks rather than floating-point values. In the demo and tests, one tick equals one cent.
 
+<p align="center">
+  <img src="docs/assets/tui.gif" width="857" alt="The TradeMatch terminal UI: a live order book with depth bars, a trade tape, and one-second candles, as an agent-based market moves from the opening call auction into continuous trading">
+</p>
+<p align="center"><em>The <a href="#live-market-simulator">live market simulator</a>: trading agents on the engine, from the opening call auction into continuous trading (<code>make tui</code>).</em></p>
+
 ## Why It Is Interesting
 
 This is the kind of systems problem that rewards precision more than size. A matching engine needs predictable behavior, strict sequencing rules, efficient cancellation, and a design that is easy to reason about under load. Even in a compact codebase, it exercises the same skills that matter in backend and low-latency systems work:
@@ -39,6 +44,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Market data: L2 depth updates, top of book, trade tape, OHLCV candles, VWAP, and a gap-free sequenced feed
 - Machine-readable reject reasons for every rejected request
 - Zero heap allocations on the request path once capacity is reserved
+- An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
 - Deterministic benchmark/demo scenarios
 
 ## API Overview
@@ -191,26 +197,30 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── .editorconfig
 ├── CMakeLists.txt
 ├── Makefile
+├── docs/assets/
+│   └── tui.gif
 ├── include/tradematch/
 │   ├── book_listener.hpp
 │   ├── detail/
 │   │   ├── config.hpp
 │   │   └── order_index.hpp
+│   ├── latency_histogram.hpp
 │   ├── market_data.hpp
 │   ├── matching_engine.hpp
 │   ├── order_book.hpp
+│   ├── simulator.hpp
 │   └── types.hpp
 ├── src/
 │   ├── formatting.cpp
 │   ├── market_data.cpp
 │   ├── matching_engine.cpp
-│   └── order_book.cpp
+│   ├── order_book.cpp
+│   └── simulator.cpp
 ├── bench/
 │   ├── baseline/
 │   │   ├── map_order_book.cpp
 │   │   └── map_order_book.hpp
 │   ├── benchmark_main.cpp
-│   ├── latency_histogram.hpp
 │   ├── system_info.hpp
 │   ├── workload.cpp
 │   └── workload.hpp
@@ -221,6 +231,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── market_data_tests.cpp
 │   ├── order_book_tests.cpp
 │   ├── order_index_tests.cpp
+│   ├── simulator_tests.cpp
 │   └── support/
 │       ├── differential.hpp
 │       └── reference_book.hpp
@@ -228,7 +239,8 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── order_book_fuzzer.cpp
 │   └── standalone_main.cpp
 └── tools/
-    └── demo_main.cpp
+    ├── demo_main.cpp
+    └── tui_main.cpp
 ```
 
 ## Build
@@ -282,6 +294,13 @@ Demo:
 ./build/tradematch_demo
 ```
 
+Live market simulator (see [Live Market Simulator](#live-market-simulator)):
+
+```bash
+make tui                                  # or ./build/tradematch_tui after a CMake build
+./build/tradematch_tui --seed 42 --speed 4
+```
+
 Benchmark (see [Performance](#performance)):
 
 ```bash
@@ -300,6 +319,40 @@ If you build with CMake instead:
 
 ```bash
 ctest --test-dir build --output-on-failure
+```
+
+## Live Market Simulator
+
+`tradematch_tui` runs an agent-based market on the engine and draws it live in the terminal. The simulator ([include/tradematch/simulator.hpp](include/tradematch/simulator.hpp)) moves a fair value on a random walk with occasional news jumps. Four kinds of agents trade around it:
+
+| Agent | Behavior |
+| --- | --- |
+| Market makers | Quote four levels per side around fair value with post-only DAY orders and re-price stale quotes with replace requests. They never quote through the opposite touch, so their quotes are never rejected |
+| Noise traders | Post passive DAY and GTC orders behind fair value, cross the touch with IOC limits and market orders, and cancel |
+| Momentum traders | Chase the trend with IOC orders when a fast moving average of the last price breaks away from a slow one |
+| Whale | Works large icebergs that show 300 to 500 shares at a time, and parks stop and stop-limit orders 8 to 20 ticks beyond fair value |
+
+Every simulated day is a full exchange session: an opening call auction, continuous trading, a closing call auction, then day-order expiry before the next open. During the auctions the screen shows the indicative price, matched volume, and surplus as orders arrive. Every agent order carries an owner and self-trade prevention, and the `STP` counter shows how often an agent would have traded with itself.
+
+The screen shows ten levels of depth per side with size bars, the spread and mid, the trade tape with the aggressor side and auction prints, one-second candles, the session clock, and live counters. These include the engine's request latency (p50 and p99, market data publishing included).
+
+A seed always replays the same market, on every platform. The standard library's random distributions produce different sequences with libc++, libstdc++, and the MSVC STL, so the simulator uses its own, and it is compiled without floating-point contraction (fused multiply-add). A golden-fingerprint test checks the stats and the entire book after a simulated day on Linux, macOS, and Windows in CI.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--seed N` | `7` | Seed for the simulated market |
+| `--speed X` | `1` | Simulated seconds per real second |
+| `--fps X` | `15` | Frames per second |
+| `--frames N` | `0` | Stop after N frames; 0 runs until Ctrl+C |
+| `--record FILE.cast` | | Also write an [asciinema](https://asciinema.org) v2 recording |
+| `--no-sleep` | | Render frames as fast as possible. Recordings keep their real-time pacing |
+| `--headless` | | Don't draw, for recordings and the CTest smoke test |
+
+To record a GIF like the one above with [agg](https://github.com/asciinema/agg):
+
+```bash
+./build/tradematch_tui --seed 7 --speed 2.5 --fps 12 --frames 330 --no-sleep --headless --record tui.cast
+agg --font-size 14 --theme monokai --last-frame-duration 3 tui.cast tui.gif
 ```
 
 ## Example Workflow
@@ -394,6 +447,15 @@ The differential test also starts every other seed with a book sized for a singl
 
 The benchmark tooling has its own tests ([tests/bench_tests.cpp](tests/bench_tests.cpp)). They check that histogram percentiles stay within the documented error bound against exact sorted percentiles, that the workload generator is deterministic per seed, and that every generated stream replays with zero rejected commands.
 
+The simulator suite ([tests/simulator_tests.cpp](tests/simulator_tests.cpp)) runs whole trading days:
+
+- a seed replays identically, and seed 42 reproduces a golden fingerprint of the stats and every resting order on every CI platform
+- sessions cycle through the opening auction, continuous trading, the closing auction, and the close, with the book in the matching phase and never crossed during continuous trading
+- auctions attract an indicative price and execute, and each finished day records its closing price
+- the agents produce a busy, valid market: over 10,000 requests a simulated minute without a single reject, self-trade prevention at work, a deep book, and prices that track fair value
+
+CTest also runs the terminal UI headless for 60 frames as a smoke test.
+
 ## Differential Testing and Fuzzing
 
 Hand-written scenarios only cover the cases someone thought of. To catch the rest, the engine is checked against a second, deliberately naive implementation ([tests/support/reference_book.hpp](tests/support/reference_book.hpp)). The reference keeps every resting order in one flat vector and finds the best match with a linear scan, so it is slow but easy to verify by reading.
@@ -482,7 +544,7 @@ Every push runs two workflows:
 | CI | Sanitizers | Every test under AddressSanitizer (with leak detection) and UndefinedBehaviorSanitizer |
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
 | CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
-| CI | Benchmark smoke test | `tradematch_benchmark` runs a short workload under CTest on every platform |
+| CI | Smoke tests | `tradematch_benchmark` runs a short workload and `tradematch_tui` renders 60 frames headless, under CTest on every platform |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
 | Fuzz | libFuzzer | Coverage-guided fuzzing under ASan + UBSan: 60 seconds per push and 20 minutes nightly. The corpus is cached between runs, so coverage keeps growing |

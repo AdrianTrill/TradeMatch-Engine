@@ -9,6 +9,8 @@ ENGINE_SRC := src/formatting.cpp src/market_data.cpp src/matching_engine.cpp src
 ENGINE_OBJ := $(ENGINE_SRC:%.cpp=$(OBJ_DIR)/%.o)
 
 DEMO_BIN := $(BUILD_DIR)/tradematch_demo
+TUI_BIN := $(BUILD_DIR)/tradematch_tui
+SIM_TEST_BIN := $(BUILD_DIR)/tradematch_simulator_tests
 BENCH_BIN := $(BUILD_DIR)/tradematch_benchmark
 TEST_BIN := $(BUILD_DIR)/tradematch_tests
 DIFF_TEST_BIN := $(BUILD_DIR)/tradematch_differential_tests
@@ -34,6 +36,9 @@ endif
 
 ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tools/demo_main.o \
+	$(OBJ_DIR)/tools/tui_main.o \
+	$(OBJ_DIR)/src/simulator.o \
+	$(OBJ_DIR)/tests/simulator_tests.o \
 	$(OBJ_DIR)/bench/benchmark_main.o \
 	$(OBJ_DIR)/bench/workload.o \
 	$(OBJ_DIR)/bench/baseline/map_order_book.o \
@@ -46,10 +51,10 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/fuzz/order_book_fuzzer.o \
 	$(OBJ_DIR)/fuzz/standalone_main.o
 
-.PHONY: all test demo benchmark fuzz-long format format-check lint sanitize coverage cmake-configure \
+.PHONY: all test demo tui benchmark fuzz-long format format-check lint sanitize coverage cmake-configure \
 	cmake-build clean
 
-all: $(DEMO_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
+all: $(DEMO_BIN) $(TUI_BIN) $(SIM_TEST_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
 	$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
 
 # Each object also emits a .d file listing the headers it includes, so header edits trigger rebuilds.
@@ -58,6 +63,16 @@ $(OBJ_DIR)/%.o: %.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
 
 $(DEMO_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/demo_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+# A fused multiply-add rounds differently from a separate multiply and add, so the simulator disables contraction to
+# replay a seed identically on every CPU.
+$(OBJ_DIR)/src/simulator.o: CXXFLAGS += -ffp-contract=off
+
+$(TUI_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tools/tui_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(SIM_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tests/simulator_tests.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BENCH_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/bench/benchmark_main.o $(OBJ_DIR)/bench/workload.o \
@@ -87,8 +102,9 @@ $(FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/order_book_fuzzer.o $(OBJ_DIR)/fuzz/s
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) $(ALLOC_TEST_BIN) \
-		$(MARKET_DATA_TEST_BIN)
+		$(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN)
 	./$(TEST_BIN)
+	./$(SIM_TEST_BIN)
 	./$(MARKET_DATA_TEST_BIN)
 	./$(INDEX_TEST_BIN)
 	./$(ALLOC_TEST_BIN)
@@ -103,6 +119,9 @@ fuzz-long: $(DIFF_TEST_BIN) $(FUZZ_BIN)
 
 demo: $(DEMO_BIN)
 	./$(DEMO_BIN)
+
+tui: $(TUI_BIN)
+	./$(TUI_BIN)
 
 benchmark: $(BENCH_BIN)
 	./$(BENCH_BIN)

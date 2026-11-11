@@ -106,7 +106,7 @@ void MarketDataFeed::on_trade(SymbolId symbol, const Trade& trade) {
     symbol_state.volume += trade.quantity;
     symbol_state.notional += static_cast<long double>(trade.price) * static_cast<long double>(trade.quantity);
     symbol_state.candles.add_trade(now_, trade.price, trade.quantity);
-    symbol_state.tape.push_back(trade);
+    symbol_state.tape.push_back(TapeEntry{now_, trade});
     while (symbol_state.tape.size() > config_.tape_length) {
         symbol_state.tape.pop_front();
     }
@@ -136,7 +136,7 @@ TopOfBook MarketDataFeed::top_of_book(SymbolId symbol) const {
     return state(symbol).depth.top();
 }
 
-const std::deque<Trade>& MarketDataFeed::recent_trades(SymbolId symbol) const {
+const std::deque<TapeEntry>& MarketDataFeed::recent_trades(SymbolId symbol) const {
     return state(symbol).tape;
 }
 
