@@ -1,0 +1,30 @@
+---
+# Lint rules enforced in CI. Whole families of correctness, performance, and modernization checks are enabled;
+# only purely stylistic checks that fight the project's conventions are opted out. Fixed RNG seeds are allowed
+# on purpose: benchmarks, simulations, and differential tests must be reproducible run to run.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-random-generator-seed,
+  clang-analyzer-*,
+  concurrency-*,
+  misc-*,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -modernize-use-designated-initializers,
+  performance-*,
+  portability-*,
+  readability-*,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-uppercase-literal-suffix,
+  -readability-math-missing-parentheses
+WarningsAsErrors: "*"
+HeaderFilterRegex: "/(include|src|tests|tools|fuzz)/"
+FormatStyle: none

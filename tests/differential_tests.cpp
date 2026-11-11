@@ -1,5 +1,6 @@
 #include "support/differential.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <exception>
@@ -44,9 +45,7 @@ bool parse_options(int argc, char** argv, Options& options) {
     return true;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
     Options options;
     try {
         if (!parse_options(argc, argv, options)) {
@@ -77,8 +76,8 @@ int main(int argc, char** argv) {
                 for (const auto& recent : history) {
                     std::cout << "    " << tradematch::testing::describe(recent) << '\n';
                 }
-                std::cout << "  reproduce with: tradematch_differential_tests --seed " << seed << " --ops "
-                          << index + 1 << '\n';
+                std::cout << "  reproduce with: tradematch_differential_tests --seed " << seed << " --ops " << index + 1
+                          << '\n';
                 return 1;
             }
         }
@@ -98,4 +97,15 @@ int main(int argc, char** argv) {
               << " cancels=" << totals.cancels << " replaces=" << totals.replaces
               << " max_resting_orders=" << totals.max_resting_orders << '\n';
     return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "fatal: " << error.what() << '\n';
+        return 1;
+    }
 }

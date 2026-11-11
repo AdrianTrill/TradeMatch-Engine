@@ -15,12 +15,12 @@ using Quantity = std::uint32_t;
 using Volume = std::uint64_t;  // Aggregated quantity (level totals, traded volume) that can exceed one order's size.
 using SequenceNumber = std::uint64_t;
 
-enum class Side {
+enum class Side : std::uint8_t {
     Buy,
     Sell
 };
 
-enum class OrderType {
+enum class OrderType : std::uint8_t {
     Limit,
     Market
 };

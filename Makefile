@@ -14,6 +14,20 @@ TEST_BIN := $(BUILD_DIR)/tradematch_tests
 DIFF_TEST_BIN := $(BUILD_DIR)/tradematch_differential_tests
 FUZZ_BIN := $(BUILD_DIR)/tradematch_fuzz_standalone
 
+SOURCES = $(shell git ls-files '*.cpp' '*.hpp')
+JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+CLANG_FORMAT ?= clang-format
+CLANG_TIDY ?= clang-tidy
+GCOVR ?= gcovr
+
+ifeq ($(shell uname -s),Darwin)
+# Apple keeps libc++ inside the SDK, so standalone LLVM tools need the sysroot; gcov data is read by llvm-cov.
+TIDY_FLAGS += --extra-arg=-isysroot --extra-arg=$(shell xcrun --show-sdk-path)
+GCOV ?= xcrun llvm-cov gcov
+else
+GCOV ?= gcov
+endif
+
 ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tools/demo_main.o \
 	$(OBJ_DIR)/tools/benchmark_main.o \
@@ -22,7 +36,8 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/fuzz/order_book_fuzzer.o \
 	$(OBJ_DIR)/fuzz/standalone_main.o
 
-.PHONY: all test demo benchmark fuzz-long cmake-configure cmake-build clean
+.PHONY: all test demo benchmark fuzz-long format format-check lint sanitize coverage cmake-configure \
+	cmake-build clean
 
 all: $(DEMO_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN)
 
@@ -61,6 +76,33 @@ demo: $(DEMO_BIN)
 
 benchmark: $(BENCH_BIN)
 	./$(BENCH_BIN)
+
+format:
+	$(CLANG_FORMAT) -i $(SOURCES)
+
+format-check:
+	$(CLANG_FORMAT) --dry-run --Werror $(SOURCES)
+
+lint:
+	cmake -S . -B $(BUILD_DIR)/lint -DCMAKE_BUILD_TYPE=Debug > /dev/null
+	git ls-files '*.cpp' | xargs -P $(JOBS) -n 1 $(CLANG_TIDY) -p $(BUILD_DIR)/lint --quiet $(TIDY_FLAGS)
+
+sanitize:
+	cmake -S . -B $(BUILD_DIR)/sanitize -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTRADEMATCH_WARNINGS_AS_ERRORS=ON \
+		-DTRADEMATCH_SANITIZERS=address,undefined > /dev/null
+	cmake --build $(BUILD_DIR)/sanitize --parallel $(JOBS)
+	ctest --test-dir $(BUILD_DIR)/sanitize --output-on-failure
+
+coverage:
+	cmake -S . -B $(BUILD_DIR)/coverage -DCMAKE_BUILD_TYPE=Debug -DTRADEMATCH_COVERAGE=ON > /dev/null
+	cmake --build $(BUILD_DIR)/coverage --parallel $(JOBS)
+	find $(BUILD_DIR)/coverage -name '*.gcda' -delete
+	ctest --test-dir $(BUILD_DIR)/coverage --output-on-failure
+	mkdir -p $(BUILD_DIR)/coverage/report
+	$(GCOVR) --root . --object-directory $(BUILD_DIR)/coverage --gcov-executable "$(GCOV)" \
+		--filter 'src/' --filter 'include/' --exclude-unreachable-branches --exclude-throw-branches \
+		--html-details $(BUILD_DIR)/coverage/report/index.html --print-summary
+	@echo "HTML report: $(BUILD_DIR)/coverage/report/index.html"
 
 cmake-configure:
 	cmake -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release

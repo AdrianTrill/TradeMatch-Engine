@@ -11,7 +11,9 @@
 
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size);
 
-int main(int argc, char** argv) {
+namespace {
+
+int run(int argc, char** argv) {
     std::uint64_t iterations = 1000;
     std::uint64_t seed = 1;
     std::vector<std::string> files;
@@ -39,9 +41,8 @@ int main(int argc, char** argv) {
                 std::cerr << "cannot open " << path << '\n';
                 return 2;
             }
-            const std::vector<std::uint8_t> bytes{std::istreambuf_iterator<char>(input),
-                                                  std::istreambuf_iterator<char>()};
-            LLVMFuzzerTestOneInput(bytes.data(), bytes.size());
+            const std::string bytes{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+            LLVMFuzzerTestOneInput(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
         }
         std::cout << "[PASS] replayed " << files.size() << " corpus file(s)\n";
         return 0;
@@ -62,4 +63,15 @@ int main(int argc, char** argv) {
 
     std::cout << "[PASS] fuzz target survived " << iterations << " random inputs (seed " << seed << ")\n";
     return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& error) {
+        std::cerr << "fatal: " << error.what() << '\n';
+        return 1;
+    }
 }

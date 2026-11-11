@@ -7,3 +7,11 @@ build/
 *.dSYM/
 compile_commands.json
 .DS_Store
+*.gcda
+*.gcno
+coverage/
+fuzz-corpus/
+crash-*
+leak-*
+timeout-*
+.cache/

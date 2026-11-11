@@ -1,0 +1,81 @@
+name: Fuzz
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Coverage-guided fuzzing budget in seconds
+        default: "600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  differential-soak:
+    name: Differential soak / 10M operations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build differential tests
+        run: cmake --build build --target tradematch_differential_tests --parallel
+
+      - name: Run 2,000 seeds x 5,000 operations against the reference book
+        run: ./build/tradematch_differential_tests --seeds 2000 --ops 5000
+
+  libfuzzer:
+    name: libFuzzer / ASan + UBSan
+    runs-on: ubuntu-latest
+    env:
+      # Short smoke runs on every push, a longer nightly campaign, and a configurable manual budget.
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1200' || inputs.seconds || '60' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Restore corpus from previous runs
+        uses: actions/cache@v6
+        with:
+          path: fuzz-corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+
+      - name: Configure
+        run: >
+          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++
+          -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
+
+      - name: Build fuzzer
+        run: cmake --build build-fuzz --target tradematch_fuzzer --parallel
+
+      - name: Fuzz for ${{ env.FUZZ_SECONDS }} seconds
+        run: |
+          mkdir -p fuzz-corpus
+          echo "Corpus entries before: $(ls fuzz-corpus | wc -l)"
+          ./build-fuzz/tradematch_fuzzer fuzz-corpus -max_total_time="${FUZZ_SECONDS}" -max_len=4096 -print_final_stats=1
+          echo "Corpus entries after: $(ls fuzz-corpus | wc -l)"
+
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore

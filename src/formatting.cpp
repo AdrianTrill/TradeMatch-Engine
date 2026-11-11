@@ -29,9 +29,10 @@ const char* to_string(OrderType type) noexcept {
 
 std::string format_price(Price price) {
     const bool negative = price < 0;
-    const auto absolute_price = negative ? -price : price;
-    const auto whole = absolute_price / 100;
-    const auto fractional = absolute_price % 100;
+    // Negate in unsigned arithmetic so the most negative price does not overflow.
+    const auto magnitude = negative ? 0U - static_cast<std::uint64_t>(price) : static_cast<std::uint64_t>(price);
+    const auto whole = magnitude / 100U;
+    const auto fractional = magnitude % 100U;
 
     std::ostringstream stream;
     if (negative) {

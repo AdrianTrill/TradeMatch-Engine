@@ -38,8 +38,8 @@ private:
 
     using OrderQueue = std::list<RestingOrder>;
     using OrderIterator = OrderQueue::iterator;
-    using BidBook = std::map<Price, OrderQueue, std::greater<Price>>;
-    using AskBook = std::map<Price, OrderQueue, std::less<Price>>;
+    using BidBook = std::map<Price, OrderQueue, std::greater<>>;
+    using AskBook = std::map<Price, OrderQueue, std::less<>>;
 
     struct OrderLocator {
         Side side{Side::Buy};

@@ -55,10 +55,9 @@ int main(int argc, char** argv) {
         const auto side = side_distribution(rng) == 0 ? tradematch::Side::Buy : tradematch::Side::Sell;
         const auto type = type_distribution(rng) == 1 ? tradematch::OrderType::Market : tradematch::OrderType::Limit;
         const auto quantity = static_cast<tradematch::Quantity>(quantity_distribution(rng));
-        const auto price =
-            type == tradematch::OrderType::Limit
-                ? static_cast<tradematch::Price>(10000 + price_offset_distribution(rng) * 5)
-                : 0;
+        const auto price = type == tradematch::OrderType::Limit
+                               ? static_cast<tradematch::Price>(10000 + price_offset_distribution(rng) * 5)
+                               : 0;
 
         if (type == tradematch::OrderType::Market) {
             ++market_orders;

@@ -1,5 +1,11 @@
 # TradeMatch Engine
 
+[![CI](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml)
+[![Fuzz](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)
+![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 TradeMatch Engine is a compact C++ order matching engine built to demonstrate the core mechanics behind a price-time-priority exchange book. The project focuses on the matching loop itself: deterministic order handling, clean data structures, strong tests, and a repository layout that is easy to inspect.
 
 Prices are represented as integer ticks rather than floating-point values. In the demo and tests, one tick equals one cent.
@@ -102,7 +108,12 @@ This yields:
 
 ```text
 .
-├── .github/workflows/ci.yml
+├── .github/workflows/
+│   ├── ci.yml
+│   └── fuzz.yml
+├── .clang-format
+├── .clang-tidy
+├── .editorconfig
 ├── CMakeLists.txt
 ├── Makefile
 ├── include/tradematch/
@@ -146,6 +157,27 @@ CMake alternative:
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
+
+CMake options:
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `TRADEMATCH_WARNINGS_AS_ERRORS` | `OFF` | Promote compiler warnings to errors (`-Werror` / `/WX`), as CI does |
+| `TRADEMATCH_SANITIZERS` | empty | Instrument every target, e.g. `address,undefined` or `thread` |
+| `TRADEMATCH_COVERAGE` | `OFF` | Build with gcov instrumentation for coverage reports |
+| `TRADEMATCH_LIBFUZZER` | `OFF` | Build the coverage-guided libFuzzer target (LLVM clang) |
+
+Developer targets (the same checks CI runs):
+
+```bash
+make format        # apply clang-format
+make format-check  # verify formatting without changing files
+make lint          # clang-tidy with the repository's .clang-tidy rules
+make sanitize      # build and test under AddressSanitizer + UndefinedBehaviorSanitizer
+make coverage      # line/branch coverage of the engine, with an HTML report
+```
+
+`format` and `lint` use clang-format and clang-tidy 22.1.8, which CI pins. Install them with `pip install clang-format==22.1.8 clang-tidy==22.1.8`. Coverage uses `pip install gcovr`.
 
 ## Run
 
@@ -234,6 +266,9 @@ The test suite covers deterministic scenarios that matter for correctness:
 - unmatched order resting in the book
 - market-order expiry of any unfilled remainder
 - invalid and duplicate-order rejection
+- replace that crosses the book and fills immediately
+- lookups for missing price levels and unknown order IDs
+- price formatting at the extremes of the 64-bit range
 - invariant checks after every submit, cancel, and replace
 
 ## Differential Testing and Fuzzing
@@ -257,6 +292,20 @@ cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DTRADEMATCH_LIBFUZZER=ON 
 cmake --build build-fuzz --target tradematch_fuzzer
 ./build-fuzz/tradematch_fuzzer -max_total_time=60
 ```
+
+## Continuous Integration
+
+Every push runs two workflows:
+
+| Workflow | Job | What it checks |
+| --- | --- | --- |
+| CI | Linux / GCC, Linux / Clang, macOS / Apple Clang, Windows / MSVC | Release build with warnings as errors, then the full test suite |
+| CI | Sanitizers | Every test under AddressSanitizer (with leak detection) and UndefinedBehaviorSanitizer |
+| CI | Format | `clang-format --dry-run --Werror` on every source file |
+| CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
+| CI | Coverage | Engine line coverage must stay at or above 95% (currently 97% of lines and branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
+| Fuzz | Differential soak | 10 million random operations compared against the reference book |
+| Fuzz | libFuzzer | Coverage-guided fuzzing under ASan + UBSan: 60 seconds per push and 20 minutes nightly. The corpus is cached between runs, so coverage keeps growing |
 
 ## Why This Project Matters
 

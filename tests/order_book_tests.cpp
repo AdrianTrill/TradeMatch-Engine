@@ -2,9 +2,13 @@
 
 #include <functional>
 #include <iostream>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -27,6 +31,14 @@ void expect_equal(const Actual& actual, const Expected& expected, const std::str
         stream << message << " (expected " << expected << ", got " << actual << ')';
         throw TestFailure(stream.str());
     }
+}
+
+template <typename T>
+T expect_value(std::optional<T> value, const std::string& message) {
+    if (!value.has_value()) {
+        throw TestFailure(message);
+    }
+    return *std::move(value);
 }
 
 void expect_book_invariants(const tradematch::OrderBook& book) {
@@ -64,18 +76,17 @@ void expect_book_invariants(const tradematch::OrderBook& book) {
                 expect(seen_order_ids.insert(order.order_id).second, "Order IDs should appear only once in the book.");
                 expect(book.has_order(order.order_id), "Indexed orders should be discoverable by order ID.");
 
-                const auto indexed_order = book.get_order(order.order_id);
-                expect(indexed_order.has_value(), "Order lookup should return every visible resting order.");
-                expect(indexed_order->side == order.side, "Order side should match the indexed view.");
-                expect_equal(indexed_order->price, order.price, "Order price should match the indexed view.");
-                expect_equal(indexed_order->remaining_quantity,
+                const auto indexed_order = expect_value(book.get_order(order.order_id),
+                                                        "Order lookup should return every visible resting order.");
+                expect(indexed_order.side == order.side, "Order side should match the indexed view.");
+                expect_equal(indexed_order.price, order.price, "Order price should match the indexed view.");
+                expect_equal(indexed_order.remaining_quantity,
                              order.remaining_quantity,
                              "Order quantity should match the indexed view.");
-                expect_equal(indexed_order->sequence, order.sequence, "Order sequence should match the indexed view.");
+                expect_equal(indexed_order.sequence, order.sequence, "Order sequence should match the indexed view.");
 
                 if (has_previous_sequence) {
-                    expect(previous_sequence < order.sequence,
-                           "Order sequence should increase within a price level.");
+                    expect(previous_sequence < order.sequence, "Order sequence should increase within a price level.");
                 }
 
                 previous_sequence = order.sequence;
@@ -144,9 +155,8 @@ void test_partial_fill_rests_remainder() {
     expect_equal(result.filled_quantity, tradematch::Quantity{80}, "Filled quantity should match resting liquidity.");
     expect_equal(result.remaining_quantity, tradematch::Quantity{40}, "Remaining quantity should rest in the book.");
 
-    const auto remaining_order = book.get_order(2);
-    expect(remaining_order.has_value(), "Remaining quantity should be visible by order ID.");
-    expect_equal(remaining_order->remaining_quantity, tradematch::Quantity{40}, "Remaining quantity should be indexed.");
+    const auto remaining_order = expect_value(book.get_order(2), "Remaining quantity should be visible by order ID.");
+    expect_equal(remaining_order.remaining_quantity, tradematch::Quantity{40}, "Remaining quantity should be indexed.");
 }
 
 void test_multiple_matches_across_price_levels() {
@@ -162,9 +172,11 @@ void test_multiple_matches_across_price_levels() {
     expect_equal(result.trades[0].price, tradematch::Price{10000}, "First trade should use first resting level price.");
     expect_equal(result.trades[1].price, tradematch::Price{10050}, "Second trade should use next resting level price.");
 
-    const auto remaining_order = book.get_order(2);
-    expect(remaining_order.has_value(), "Second resting order should have remaining quantity.");
-    expect_equal(remaining_order->remaining_quantity, tradematch::Quantity{20}, "Remaining quantity should be preserved.");
+    const auto remaining_order =
+        expect_value(book.get_order(2), "Second resting order should have remaining quantity.");
+    expect_equal(remaining_order.remaining_quantity,
+                 tradematch::Quantity{20},
+                 "Remaining quantity should be preserved.");
 }
 
 void test_price_time_priority() {
@@ -175,12 +187,17 @@ void test_price_time_priority() {
 
     const auto result = submit_checked(book, {3, tradematch::Side::Sell, tradematch::OrderType::Limit, 60, 10000});
     expect_equal(result.trades.size(), std::size_t{2}, "Sell order should match both resting bids.");
-    expect_equal(result.trades[0].buy_order_id, tradematch::OrderId{1}, "Older order should fill first at the same price.");
-    expect_equal(result.trades[1].buy_order_id, tradematch::OrderId{2}, "Newer order should fill second at the same price.");
+    expect_equal(result.trades[0].buy_order_id,
+                 tradematch::OrderId{1},
+                 "Older order should fill first at the same price.");
+    expect_equal(result.trades[1].buy_order_id,
+                 tradematch::OrderId{2},
+                 "Newer order should fill second at the same price.");
 
-    const auto remaining_order = book.get_order(2);
-    expect(remaining_order.has_value(), "Second order should still be resting.");
-    expect_equal(remaining_order->remaining_quantity, tradematch::Quantity{20}, "FIFO should leave the correct remainder.");
+    const auto remaining_order = expect_value(book.get_order(2), "Second order should still be resting.");
+    expect_equal(remaining_order.remaining_quantity,
+                 tradematch::Quantity{20},
+                 "FIFO should leave the correct remainder.");
 }
 
 void test_cancel_order() {
@@ -208,7 +225,9 @@ void test_unmatched_order_rests_in_book() {
     expect_equal(snapshot.bids.size(), std::size_t{1}, "One bid level should be present.");
     expect_equal(snapshot.bids.front().price, tradematch::Price{9950}, "Bid price level should match input.");
     expect_equal(snapshot.bids.front().total_quantity, tradematch::Quantity{35}, "Resting quantity should be visible.");
-    expect_equal(snapshot.bids.front().order_ids.front(), tradematch::OrderId{1}, "Order ID should be retained at the level.");
+    expect_equal(snapshot.bids.front().order_ids.front(),
+                 tradematch::OrderId{1},
+                 "Order ID should be retained at the level.");
 }
 
 void test_market_order_expires_after_available_liquidity() {
@@ -220,7 +239,9 @@ void test_market_order_expires_after_available_liquidity() {
     const auto result = submit_checked(book, {3, tradematch::Side::Buy, tradematch::OrderType::Market, 80, 0});
     expect(result.accepted, "Market order should be accepted.");
     expect(result.expired, "Unfilled market remainder should expire instead of resting.");
-    expect_equal(result.filled_quantity, tradematch::Quantity{60}, "Market order should consume all available liquidity.");
+    expect_equal(result.filled_quantity,
+                 tradematch::Quantity{60},
+                 "Market order should consume all available liquidity.");
     expect_equal(result.remaining_quantity, tradematch::Quantity{20}, "Remainder should be reported after expiry.");
     expect_equal(book.order_count(), std::size_t{0}, "Market order should leave no resting asks in this scenario.");
 }
@@ -257,14 +278,18 @@ void test_replace_order_resets_time_priority() {
 
     const auto result = submit_checked(book, {3, tradematch::Side::Sell, tradematch::OrderType::Limit, 50, 10000});
     expect_equal(result.trades.size(), std::size_t{2}, "Sell order should match both bids after replacement.");
-    expect_equal(result.trades[0].buy_order_id, tradematch::OrderId{2}, "Unreplaced order should keep earlier priority.");
+    expect_equal(result.trades[0].buy_order_id,
+                 tradematch::OrderId{2},
+                 "Unreplaced order should keep earlier priority.");
     expect_equal(result.trades[1].buy_order_id,
                  tradematch::OrderId{1},
                  "Replaced order should lose time priority and fill second.");
 
-    const auto remaining_order = book.get_order(1);
-    expect(remaining_order.has_value(), "Replaced order should still be resting with remaining quantity.");
-    expect_equal(remaining_order->remaining_quantity, tradematch::Quantity{30}, "Replace scenario should leave the expected remainder.");
+    const auto remaining_order =
+        expect_value(book.get_order(1), "Replaced order should still be resting with remaining quantity.");
+    expect_equal(remaining_order.remaining_quantity,
+                 tradematch::Quantity{30},
+                 "Replace scenario should leave the expected remainder.");
 }
 
 void test_replace_rejects_invalid_request_without_removing_resting_order() {
@@ -276,10 +301,10 @@ void test_replace_rejects_invalid_request_without_removing_resting_order() {
     expect(!replace.replaced, "Invalid replacement should fail.");
     expect(book.has_order(1), "Rejected replacement should leave the original resting order untouched.");
 
-    const auto order = book.get_order(1);
-    expect(order.has_value(), "Original order should still be visible after rejected replacement.");
-    expect_equal(order->price, tradematch::Price{10000}, "Rejected replacement should preserve the old price.");
-    expect_equal(order->remaining_quantity,
+    const auto order =
+        expect_value(book.get_order(1), "Original order should still be visible after rejected replacement.");
+    expect_equal(order.price, tradematch::Price{10000}, "Rejected replacement should preserve the old price.");
+    expect_equal(order.remaining_quantity,
                  tradematch::Quantity{25},
                  "Rejected replacement should preserve the old quantity.");
 }
@@ -294,10 +319,9 @@ void test_replace_rejects_side_change() {
     expect(!replace.replaced, "Replace must not flip a resting buy into a sell.");
     expect_equal(replace.submit_result.trades.size(), std::size_t{0}, "Rejected replace must not trade.");
 
-    const auto order = book.get_order(1);
-    expect(order.has_value(), "Original order should survive a rejected side change.");
-    expect(order->side == tradematch::Side::Buy, "Original order should keep its side.");
-    expect_equal(order->remaining_quantity, tradematch::Quantity{100}, "Original order should keep its quantity.");
+    const auto order = expect_value(book.get_order(1), "Original order should survive a rejected side change.");
+    expect(order.side == tradematch::Side::Buy, "Original order should keep its side.");
+    expect_equal(order.remaining_quantity, tradematch::Quantity{100}, "Original order should keep its quantity.");
     expect(book.has_order(2), "Other resting orders must be untouched.");
 }
 
@@ -311,9 +335,8 @@ void test_replace_rejects_order_type_change() {
     expect(!replace.replaced, "Replace must not turn a resting limit order into a market order.");
     expect_equal(replace.submit_result.trades.size(), std::size_t{0}, "Rejected replace must not trade.");
 
-    const auto order = book.get_order(1);
-    expect(order.has_value(), "Original order should survive a rejected type change.");
-    expect_equal(order->price, tradematch::Price{10000}, "Original order should keep its price.");
+    const auto order = expect_value(book.get_order(1), "Original order should survive a rejected type change.");
+    expect_equal(order.price, tradematch::Price{10000}, "Original order should keep its price.");
     expect_equal(book.order_count(), std::size_t{2}, "Book should be unchanged after a rejected replace.");
 }
 
@@ -330,14 +353,64 @@ void test_level_quantity_does_not_overflow() {
                  "Level totals must not wrap around at 32 bits.");
 }
 
+void test_replace_that_crosses_the_book_fills_immediately() {
+    tradematch::OrderBook book;
+
+    submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 30, 10000});
+    submit_checked(book, {2, tradematch::Side::Sell, tradematch::OrderType::Limit, 50, 10100});
+
+    const auto replace = replace_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 30, 10100});
+    expect(replace.replaced, "A crossing replace should be accepted.");
+    expect(!replace.submit_result.rested, "A fully filled replacement should not rest.");
+    expect_equal(replace.submit_result.trades.size(), std::size_t{1}, "The replacement should trade once.");
+    expect_equal(replace.submit_result.trades.front().price,
+                 tradematch::Price{10100},
+                 "The replacement should trade at the resting ask price.");
+    expect(!book.has_order(1), "The fully filled replacement should leave the book.");
+    expect_equal(expect_value(book.get_order(2), "The ask should keep its remainder.").remaining_quantity,
+                 tradematch::Quantity{20},
+                 "The ask should keep the unfilled remainder.");
+}
+
+void test_level_lookup_for_missing_price_is_empty() {
+    tradematch::OrderBook book;
+
+    submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 10, 10000});
+    submit_checked(book, {2, tradematch::Side::Sell, tradematch::OrderType::Limit, 10, 10100});
+
+    expect(book.get_orders_at_level(tradematch::Side::Buy, 9999).empty(), "Missing bid levels should be empty.");
+    expect(book.get_orders_at_level(tradematch::Side::Sell, 10101).empty(), "Missing ask levels should be empty.");
+    expect(!book.get_order(42).has_value(), "Unknown order IDs should not resolve.");
+}
+
+void test_formatting_helpers() {
+    expect_equal(std::string{tradematch::to_string(tradematch::Side::Buy)}, std::string{"BUY"}, "Buy side label.");
+    expect_equal(std::string{tradematch::to_string(tradematch::Side::Sell)}, std::string{"SELL"}, "Sell side label.");
+    expect_equal(std::string{tradematch::to_string(tradematch::OrderType::Limit)},
+                 std::string{"LIMIT"},
+                 "Limit order label.");
+    expect_equal(std::string{tradematch::to_string(tradematch::OrderType::Market)},
+                 std::string{"MARKET"},
+                 "Market order label.");
+
+    expect_equal(tradematch::format_price(10050), std::string{"100.50"}, "Ticks should format as cents.");
+    expect_equal(tradematch::format_price(5), std::string{"0.05"}, "Sub-dollar prices should be zero padded.");
+    expect_equal(tradematch::format_price(0), std::string{"0.00"}, "Zero should format with two decimals.");
+    expect_equal(tradematch::format_price(-5), std::string{"-0.05"}, "Negative prices should keep their sign.");
+    expect_equal(tradematch::format_price(std::numeric_limits<tradematch::Price>::max()),
+                 std::string{"92233720368547758.07"},
+                 "The largest price should format exactly.");
+    expect_equal(tradematch::format_price(std::numeric_limits<tradematch::Price>::min()),
+                 std::string{"-92233720368547758.08"},
+                 "The most negative price should format without overflow.");
+}
+
 struct TestCase {
     const char* name;
     std::function<void()> run;
 };
 
-}  // namespace
-
-int main() {
+int run_all_tests() {
     const std::vector<TestCase> tests = {
         {"exact_match", test_exact_match},
         {"partial_fill_rests_remainder", test_partial_fill_rests_remainder},
@@ -353,6 +426,9 @@ int main() {
         {"replace_rejects_side_change", test_replace_rejects_side_change},
         {"replace_rejects_order_type_change", test_replace_rejects_order_type_change},
         {"level_quantity_does_not_overflow", test_level_quantity_does_not_overflow},
+        {"replace_that_crosses_the_book_fills_immediately", test_replace_that_crosses_the_book_fills_immediately},
+        {"level_lookup_for_missing_price_is_empty", test_level_lookup_for_missing_price_is_empty},
+        {"formatting_helpers", test_formatting_helpers},
     };
 
     std::size_t failures = 0;
@@ -374,4 +450,15 @@ int main() {
 
     std::cout << failures << " test(s) failed.\n";
     return 1;
+}
+
+}  // namespace
+
+int main() {
+    try {
+        return run_all_tests();
+    } catch (const std::exception& error) {
+        std::cerr << "fatal: " << error.what() << '\n';
+        return 1;
+    }
 }

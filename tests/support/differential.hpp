@@ -15,12 +15,20 @@
 
 namespace tradematch::testing {
 
-enum class OpKind : std::uint8_t { Submit, Cancel, Replace };
+enum class OpKind : std::uint8_t {
+    Submit,
+    Cancel,
+    Replace
+};
 
 struct Operation {
     OpKind kind{OpKind::Submit};
     OrderRequest order;  // Cancel only uses order.order_id.
 };
+
+inline Side opposite(Side side) noexcept {
+    return side == Side::Buy ? Side::Sell : Side::Buy;
+}
 
 inline std::string describe(const Operation& op) {
     std::ostringstream out;
@@ -227,9 +235,9 @@ private:
         if (engine_order.has_value() != reference_order.has_value()) {
             return field("get_order.has_value", engine_order.has_value(), reference_order.has_value());
         }
-        if (engine_order && (engine_order->remaining_quantity != reference_order->remaining_quantity ||
-                             engine_order->price != reference_order->price ||
-                             engine_order->sequence != reference_order->sequence)) {
+        if (engine_order && reference_order &&
+            (engine_order->remaining_quantity != reference_order->remaining_quantity ||
+             engine_order->price != reference_order->price || engine_order->sequence != reference_order->sequence)) {
             return "get_order view differs for id " + std::to_string(touched_order_id);
         }
         return {};
@@ -320,7 +328,7 @@ private:
         const auto known = sides_.find(op.order.order_id);
         const Side side = known != sides_.end() ? known->second : Side::Buy;
         const bool flip_side = uniform(0, 19) == 0;
-        op.order.side = flip_side ? (side == Side::Buy ? Side::Sell : Side::Buy) : side;
+        op.order.side = flip_side ? opposite(side) : side;
         op.order.type = uniform(0, 19) == 0 ? OrderType::Market : OrderType::Limit;
         op.order.quantity = pick_quantity();
         op.order.price = pick_price(op.order.type);
@@ -361,8 +369,8 @@ public:
     Operation next() {
         Operation op;
         const auto selector = byte();
-        op.kind = selector < 128 ? OpKind::Submit : (selector < 208 ? OpKind::Cancel : OpKind::Replace);
-        op.order.order_id = byte() % 32;  // ID 0 is invalid and exercises validation.
+        op.kind = decode_kind(selector);
+        op.order.order_id = byte() % 32U;  // ID 0 is invalid and exercises validation.
 
         const auto flags = byte();
         op.order.side = (flags & 1U) != 0U ? Side::Sell : Side::Buy;
@@ -373,14 +381,25 @@ public:
         if (op.order.type == OrderType::Market) {
             op.order.price = (flags & 0x10U) != 0U && price_byte < 8 ? 10000 : 0;
         } else {
-            op.order.price = price_byte < 4 ? -static_cast<Price>(price_byte) : 9984 + static_cast<Price>(price_byte % 32);
+            op.order.price =
+                price_byte < 4 ? -static_cast<Price>(price_byte) : 9984 + static_cast<Price>(price_byte % 32);
         }
         return op;
     }
 
 private:
+    static OpKind decode_kind(std::uint8_t selector) noexcept {
+        if (selector < 128) {
+            return OpKind::Submit;
+        }
+        if (selector < 208) {
+            return OpKind::Cancel;
+        }
+        return OpKind::Replace;
+    }
+
     std::uint8_t byte() noexcept {
-        return position_ < size_ ? data_[position_++] : 0U;
+        return position_ < size_ ? data_[position_++] : std::uint8_t{0};
     }
 
     const std::uint8_t* data_;

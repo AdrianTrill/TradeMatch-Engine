@@ -162,9 +162,7 @@ ReplaceResult OrderBook::replace(const OrderRequest& replacement) {
         return result;
     }
 
-    if (result.submit_result.expired) {
-        result.message = "Order replaced and the new market order expired after matching available liquidity.";
-    } else if (result.submit_result.rested) {
+    if (result.submit_result.rested) {
         result.message = "Order replaced and re-entered the book with a new priority timestamp.";
     } else {
         result.message = "Order replaced and fully filled immediately.";
@@ -265,8 +263,8 @@ void OrderBook::match_buy_order(WorkingOrder& incoming, SubmitResult& result) {
         while (incoming.remaining_quantity > 0U && !resting_queue.empty()) {
             auto resting_it = resting_queue.begin();
             auto& resting_order = *resting_it;
-            const auto trade_quantity = static_cast<Quantity>(
-                std::min(incoming.remaining_quantity, resting_order.remaining_quantity));
+            const auto trade_quantity =
+                static_cast<Quantity>(std::min(incoming.remaining_quantity, resting_order.remaining_quantity));
 
             append_trade(incoming, resting_order, trade_quantity, resting_order.price, result);
 
@@ -296,8 +294,8 @@ void OrderBook::match_sell_order(WorkingOrder& incoming, SubmitResult& result) {
         while (incoming.remaining_quantity > 0U && !resting_queue.empty()) {
             auto resting_it = resting_queue.begin();
             auto& resting_order = *resting_it;
-            const auto trade_quantity = static_cast<Quantity>(
-                std::min(incoming.remaining_quantity, resting_order.remaining_quantity));
+            const auto trade_quantity =
+                static_cast<Quantity>(std::min(incoming.remaining_quantity, resting_order.remaining_quantity));
 
             append_trade(incoming, resting_order, trade_quantity, resting_order.price, result);
 
@@ -317,7 +315,7 @@ void OrderBook::match_sell_order(WorkingOrder& incoming, SubmitResult& result) {
 }
 
 void OrderBook::rest_order(const WorkingOrder& order) {
-    RestingOrder resting_order{
+    const RestingOrder resting_order{
         order.request.order_id,
         order.request.side,
         order.request.price,

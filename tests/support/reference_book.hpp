@@ -100,9 +100,8 @@ public:
     }
 
     std::optional<RestingOrderView> get_order(OrderId order_id) const {
-        const auto it = std::find_if(orders_.begin(), orders_.end(), [&](const auto& order) {
-            return order.order_id == order_id;
-        });
+        const auto it =
+            std::find_if(orders_.begin(), orders_.end(), [&](const auto& order) { return order.order_id == order_id; });
         if (it == orders_.end()) {
             return std::nullopt;
         }
@@ -121,9 +120,9 @@ public:
             return left.sequence < right.sequence;
         });
 
-        BookSnapshot snapshot;
+        BookSnapshot book_snapshot;
         for (const auto& order : sorted) {
-            auto& levels = order.side == Side::Buy ? snapshot.bids : snapshot.asks;
+            auto& levels = order.side == Side::Buy ? book_snapshot.bids : book_snapshot.asks;
             if (levels.empty() || levels.back().price != order.price) {
                 levels.push_back(PriceLevelView{order.price, 0U, 0U, {}});
             }
@@ -132,7 +131,7 @@ public:
             ++level.order_count;
             level.order_ids.push_back(order.order_id);
         }
-        return snapshot;
+        return book_snapshot;
     }
 
     std::size_t order_count() const noexcept {

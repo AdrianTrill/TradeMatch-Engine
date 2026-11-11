@@ -3,64 +3,156 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLVM_TOOLS_VERSION: "22.1.8"
+  GCOVR_VERSION: "8.8"
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        compiler: [g++, clang++]
+        include:
+          - name: Linux / GCC
+            os: ubuntu-latest
+            compiler: -DCMAKE_CXX_COMPILER=g++
+          - name: Linux / Clang
+            os: ubuntu-latest
+            compiler: -DCMAKE_CXX_COMPILER=clang++
+          - name: macOS / Apple Clang
+            os: macos-latest
+            compiler: -DCMAKE_CXX_COMPILER=clang++
+          - name: Windows / MSVC
+            os: windows-latest
+            compiler: ""
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTRADEMATCH_WARNINGS_AS_ERRORS=ON ${{ matrix.compiler }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure
+
+  sanitizers:
+    name: Sanitizers / ASan + UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++
+          -DTRADEMATCH_WARNINGS_AS_ERRORS=ON -DTRADEMATCH_SANITIZERS=address,undefined
 
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Run tests
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --test-dir build --output-on-failure
 
-  fuzz:
+  format:
+    name: Format / clang-format
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Configure release build for the differential soak
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build differential tests
-        run: cmake --build build --target tradematch_differential_tests --parallel
-
-      - name: Differential soak (2,000 seeds x 5,000 operations)
-        run: ./build/tradematch_differential_tests --seeds 2000 --ops 5000
-
-      - name: Configure libFuzzer build
-        run: >
-          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++
-          -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
-
-      - name: Build libFuzzer target (ASan + UBSan)
-        run: cmake --build build-fuzz --target tradematch_fuzzer --parallel
-
-      - name: Coverage-guided fuzzing for 60 seconds
-        run: |
-          mkdir -p fuzz-corpus
-          ./build-fuzz/tradematch_fuzzer fuzz-corpus -max_total_time=60 -max_len=4096 -print_final_stats=1
-
-      - name: Upload crash reproducers
-        if: failure()
-        uses: actions/upload-artifact@v4
+      - name: Set up Python
+        uses: actions/setup-python@v7
         with:
-          name: fuzz-crashes
-          path: |
-            crash-*
-            leak-*
-            timeout-*
+          python-version: "3.13"
+
+      - name: Install clang-format
+        run: pip install "clang-format==${LLVM_TOOLS_VERSION}"
+
+      - name: Check formatting
+        run: git ls-files '*.cpp' '*.hpp' | xargs clang-format --dry-run --Werror
+
+  lint:
+    name: Lint / clang-tidy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install clang-tidy
+        run: pip install "clang-tidy==${LLVM_TOOLS_VERSION}"
+
+      - name: Export compile commands
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
+
+      - name: Run clang-tidy
+        run: git ls-files '*.cpp' | xargs -P "$(nproc)" -n 1 clang-tidy -p build --quiet
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install gcovr
+        run: pip install "gcovr==${GCOVR_VERSION}"
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++ -DTRADEMATCH_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Report engine coverage
+        run: |
+          mkdir -p coverage
+          gcovr --root . --object-directory build --filter 'src/' --filter 'include/' \
+            --exclude-unreachable-branches --exclude-throw-branches \
+            --html-details coverage/index.html --html-title "TradeMatch Engine coverage" \
+            --json-summary coverage/summary.json --json-summary-pretty \
+            --markdown-summary coverage/summary.md --markdown-title "Engine coverage" \
+            --print-summary --fail-under-line 95
+          cat coverage/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage/
           if-no-files-found: ignore
