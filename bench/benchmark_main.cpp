@@ -476,6 +476,10 @@ int run(int argc, char** argv) {
         print_engine(options, *reports.back());
     }
     if (reports.size() == 2) {
+        if (reports.front()->trades != reports.back()->trades ||
+            reports.front()->resting_orders != reports.back()->resting_orders) {
+            throw std::runtime_error("the engines diverged on the same stream, so the comparison would be unfair");
+        }
         print_comparison(*reports.front(), *reports.back());
     }
 

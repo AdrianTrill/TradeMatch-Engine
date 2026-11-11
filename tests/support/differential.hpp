@@ -48,7 +48,9 @@ inline std::string describe(const Operation& op) {
     }
     out << "id=" << op.order.order_id << ' ' << to_string(op.order.side) << ' ' << to_string(op.order.type)
         << " qty=" << op.order.quantity << " price=" << op.order.price << ' ' << to_string(op.order.time_in_force)
-        << (op.order.post_only ? " POST_ONLY" : "");
+        << (op.order.post_only ? " POST_ONLY" : "") << " stop=" << op.order.stop_price
+        << " display=" << op.order.display_quantity << " owner=" << op.order.owner
+        << " stp=" << to_string(op.order.self_trade_prevention);
     return out.str();
 }
 
@@ -67,6 +69,8 @@ public:
         std::size_t replaces{0};
         std::size_t amends_in_place{0};
         std::size_t day_expiries{0};
+        std::size_t stops_triggered{0};
+        std::size_t self_trade_cancels{0};
         std::size_t max_resting_orders{0};
     };
 
@@ -79,6 +83,8 @@ public:
                 mismatch = compare_submit(result, reference_.submit(op.order), "submit");
                 stats_.trades += result.trades.size();
                 stats_.rejections += result.accepted ? 0U : 1U;
+                stats_.stops_triggered += result.triggered_stops.size();
+                stats_.self_trade_cancels += result.self_trade_cancels.size();
                 break;
             }
             case OpKind::Cancel: {
@@ -93,6 +99,8 @@ public:
                 stats_.replaces += result.replaced ? 1U : 0U;
                 stats_.amends_in_place += result.priority_kept ? 1U : 0U;
                 stats_.trades += result.submit_result.trades.size();
+                stats_.stops_triggered += result.submit_result.triggered_stops.size();
+                stats_.self_trade_cancels += result.submit_result.self_trade_cancels.size();
                 break;
             }
             case OpKind::ExpireDay: {
@@ -172,6 +180,20 @@ private:
         }
         if (engine.expired != reference.expired) {
             return field((prefix + "expired").c_str(), engine.expired, reference.expired);
+        }
+        if (engine.pending_trigger != reference.pending_trigger) {
+            return field((prefix + "pending_trigger").c_str(), engine.pending_trigger, reference.pending_trigger);
+        }
+        if (engine.self_trade_prevented != reference.self_trade_prevented) {
+            return field((prefix + "self_trade_prevented").c_str(),
+                         engine.self_trade_prevented,
+                         reference.self_trade_prevented);
+        }
+        if (!std::ranges::equal(engine.triggered_stops, reference.triggered_stops)) {
+            return prefix + "triggered_stops differ";
+        }
+        if (!std::ranges::equal(engine.self_trade_cancels, reference.self_trade_cancels)) {
+            return prefix + "self_trade_cancels differ";
         }
         if (engine.filled_quantity != reference.filled_quantity) {
             return field((prefix + "filled").c_str(), engine.filled_quantity, reference.filled_quantity);
@@ -268,6 +290,14 @@ private:
         if (engine_.best_ask() != reference_.best_ask()) {
             return field("best_ask", engine_.best_ask().value_or(-1), reference_.best_ask().value_or(-1));
         }
+        if (engine_.stop_order_count() != reference_.stop_order_count()) {
+            return field("stop_order_count", engine_.stop_order_count(), reference_.stop_order_count());
+        }
+        if (engine_.last_trade_price() != reference_.last_trade_price()) {
+            return field("last_trade_price",
+                         engine_.last_trade_price().value_or(-1),
+                         reference_.last_trade_price().value_or(-1));
+        }
 
         const auto engine_order = engine_.get_order(touched_order_id);
         const auto reference_order = reference_.get_order(touched_order_id);
@@ -277,7 +307,10 @@ private:
         if (engine_order && reference_order &&
             (engine_order->remaining_quantity != reference_order->remaining_quantity ||
              engine_order->price != reference_order->price || engine_order->sequence != reference_order->sequence ||
-             engine_order->time_in_force != reference_order->time_in_force)) {
+             engine_order->time_in_force != reference_order->time_in_force ||
+             engine_order->visible_quantity != reference_order->visible_quantity ||
+             engine_order->display_quantity != reference_order->display_quantity ||
+             engine_order->owner != reference_order->owner)) {
             return "get_order view differs for id " + std::to_string(touched_order_id);
         }
         return {};
@@ -347,6 +380,34 @@ private:
         return uniform(0, 3) == 0 ? TimeInForce::Day : TimeInForce::GoodTillCancel;
     }
 
+    OrderType pick_order_type() {
+        const auto roll = uniform(0, 99);
+        if (roll < 10) {
+            return OrderType::Market;
+        }
+        if (roll < 16) {
+            return OrderType::Stop;
+        }
+        return roll < 22 ? OrderType::StopLimit : OrderType::Limit;
+    }
+
+    // Stop prices inside the trading band, iceberg display sizes, and a few owners with random prevention modes.
+    // Roughly one request in fifty carries an invalid combination to exercise validation.
+    void add_advanced_fields(OrderRequest& order) {
+        const bool stop = order.type == OrderType::Stop || order.type == OrderType::StopLimit;
+        if (stop || uniform(0, 99) == 0) {
+            order.stop_price = uniform(0, 49) == 0 ? 0 : 9990 + static_cast<Price>(uniform(0, 20));
+        }
+        if (uniform(0, 99) < 15 && order.quantity > 0U) {
+            order.display_quantity =
+                static_cast<Quantity>(uniform(1, order.quantity + (uniform(0, 19) == 0 ? 5U : 0U)));
+        }
+        if (uniform(0, 99) < 40) {
+            order.owner = static_cast<OwnerId>(uniform(1, 3));
+            order.self_trade_prevention = static_cast<SelfTradePrevention>(uniform(0, 3));
+        }
+    }
+
     TimeInForce pick_time_in_force() {
         const auto roll = uniform(0, 99);
         if (roll < 60) {
@@ -372,11 +433,12 @@ private:
         }
 
         op.order.side = uniform(0, 1) == 0 ? Side::Buy : Side::Sell;
-        op.order.type = uniform(0, 9) == 0 ? OrderType::Market : OrderType::Limit;
+        op.order.type = pick_order_type();
         op.order.quantity = pick_quantity();
         op.order.price = pick_price(op.order.type);
         op.order.time_in_force = pick_time_in_force();
         op.order.post_only = uniform(0, 9) == 0;
+        add_advanced_fields(op.order);
         remember(op.order);
         return op;
     }
@@ -402,12 +464,15 @@ private:
         op.order.price = pick_price(op.order.type);
         op.order.time_in_force = pick_replacement_time_in_force();
         op.order.post_only = uniform(0, 9) == 0;
+        add_advanced_fields(op.order);
 
         // Half of the replacements keep the current price with the same or a smaller size: the in-place amend path.
         const auto current = book.get_order(op.order.order_id);
         if (current && op.order.type == OrderType::Limit && uniform(0, 1) == 0) {
             op.order.price = current->price;
             op.order.quantity = static_cast<Quantity>(uniform(1, current->remaining_quantity));
+            op.order.display_quantity = current->display_quantity;
+            op.order.stop_price = 0;
         }
         return op;
     }
@@ -451,7 +516,7 @@ public:
 
         const auto flags = byte();
         op.order.side = (flags & 1U) != 0U ? Side::Sell : Side::Buy;
-        op.order.type = (flags & 0x0EU) == 0U ? OrderType::Market : OrderType::Limit;
+        op.order.type = decode_type(static_cast<std::uint8_t>((flags >> 1U) & 7U));
         op.order.quantity = static_cast<Quantity>(byte() % 64);
 
         const auto extras = byte();
@@ -459,16 +524,36 @@ public:
         op.order.post_only = (extras & 0x1CU) == 0U;
 
         const auto price_byte = byte();
-        if (op.order.type == OrderType::Market) {
+        if (op.order.type == OrderType::Market || op.order.type == OrderType::Stop) {
             op.order.price = (flags & 0x10U) != 0U && price_byte < 8 ? 10000 : 0;
         } else {
             op.order.price =
                 price_byte < 4 ? -static_cast<Price>(price_byte) : 9984 + static_cast<Price>(price_byte % 32);
         }
+
+        const auto advanced = byte();
+        const auto stop_byte = byte();
+        const bool stop = op.order.type == OrderType::Stop || op.order.type == OrderType::StopLimit;
+        if (stop || stop_byte == 255) {
+            op.order.stop_price = stop_byte < 2 ? 0 : 9984 + static_cast<Price>(stop_byte % 32);
+        }
+        op.order.display_quantity = static_cast<Quantity>(advanced & 7U) * 3U;
+        op.order.owner = static_cast<OwnerId>((advanced >> 3U) & 3U);
+        op.order.self_trade_prevention = static_cast<SelfTradePrevention>((advanced >> 5U) & 3U);
         return op;
     }
 
 private:
+    static OrderType decode_type(std::uint8_t bits) noexcept {
+        if (bits == 0) {
+            return OrderType::Market;
+        }
+        if (bits == 6) {
+            return OrderType::Stop;
+        }
+        return bits == 7 ? OrderType::StopLimit : OrderType::Limit;
+    }
+
     static OpKind decode_kind(std::uint8_t selector) noexcept {
         if (selector < 128) {
             return OpKind::Submit;

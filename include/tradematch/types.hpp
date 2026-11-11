@@ -16,6 +16,7 @@ using Price = std::int64_t;  // Integer price ticks, represented as cents in the
 using Quantity = std::uint32_t;
 using Volume = std::uint64_t;  // Aggregated quantity (level totals, traded volume) that can exceed one order's size.
 using SequenceNumber = std::uint64_t;
+using OwnerId = std::uint32_t;  // trading account or firm, used for self-trade prevention; 0 means none
 
 enum class Side : std::uint8_t {
     Buy,
@@ -24,7 +25,9 @@ enum class Side : std::uint8_t {
 
 enum class OrderType : std::uint8_t {
     Limit,
-    Market
+    Market,
+    Stop,      // becomes a market order once the last trade price reaches stop_price
+    StopLimit  // becomes a limit order at `price` once the last trade price reaches stop_price
 };
 
 enum class TimeInForce : std::uint8_t {
@@ -34,19 +37,30 @@ enum class TimeInForce : std::uint8_t {
     FillOrKill          // trades its full quantity immediately or does nothing
 };
 
+// What happens when an incoming order would trade against a resting order with the same non-zero owner. The incoming
+// order's setting decides, as on most venues.
+enum class SelfTradePrevention : std::uint8_t {
+    None,          // allow the self-trade
+    CancelNewest,  // cancel the incoming order's remaining quantity
+    CancelOldest,  // cancel the resting order and keep matching
+    CancelBoth     // cancel the resting order and the incoming order's remaining quantity
+};
+
 // Why a request was rejected. Every rejection leaves the book unchanged.
 enum class RejectReason : std::uint8_t {
     None,
-    InvalidOrderId,      // order ID 0 is reserved
-    InvalidQuantity,     // quantity must be positive
-    InvalidPrice,        // limit prices must be positive, market orders must use price 0
-    DuplicateOrderId,    // the ID already belongs to a resting order
-    UnknownOrder,        // cancel or replace of an ID that is not resting
-    SideChange,          // replace may not change the side
-    TypeChange,          // replace must keep the limit order type
-    InvalidTimeInForce,  // a replacement must be able to rest (GTC or DAY)
-    InvalidPostOnly,     // post-only requires a limit order that can rest (GTC or DAY)
-    PostOnlyWouldCross   // a post-only order may not take liquidity
+    InvalidOrderId,         // order ID 0 is reserved
+    InvalidQuantity,        // quantity must be positive
+    InvalidPrice,           // limit prices must be positive, market orders must use price 0
+    DuplicateOrderId,       // the ID already belongs to a resting order
+    UnknownOrder,           // cancel or replace of an ID that is not resting
+    SideChange,             // replace may not change the side
+    TypeChange,             // replace must keep the limit order type
+    InvalidTimeInForce,     // a replacement must be able to rest (GTC or DAY)
+    InvalidPostOnly,        // post-only requires a limit order that can rest (GTC or DAY)
+    PostOnlyWouldCross,     // a post-only order may not take liquidity
+    InvalidStopPrice,       // stop orders need a positive stop price; other orders must leave it at 0
+    InvalidDisplayQuantity  // icebergs need a limit price, a resting time in force, and display <= quantity
 };
 
 struct OrderRequest {
@@ -56,7 +70,11 @@ struct OrderRequest {
     Quantity quantity{};
     Price price{};
     TimeInForce time_in_force{TimeInForce::GoodTillCancel};
-    bool post_only{false};  // rejected instead of trading if it would take liquidity
+    bool post_only{false};        // rejected instead of trading if it would take liquidity
+    Price stop_price{};           // trigger for Stop and StopLimit orders
+    Quantity display_quantity{};  // iceberg tranche size; 0 displays the full quantity
+    OwnerId owner{};              // self-trade prevention group; 0 opts out
+    SelfTradePrevention self_trade_prevention{SelfTradePrevention::None};
 };
 
 struct Trade {
@@ -76,10 +94,14 @@ struct SubmitResult {
     bool accepted{false};
     bool rested{false};
     bool expired{false};
+    bool pending_trigger{false};       // a stop order waiting in the stop book
+    bool self_trade_prevented{false};  // self-trade prevention cancelled the incoming order's remainder
     RejectReason reject_reason{RejectReason::None};
     Quantity filled_quantity{};
     Quantity remaining_quantity{};
-    std::span<const Trade> trades;
+    std::span<const Trade> trades;                // every trade the request caused, including triggered stops
+    std::span<const OrderId> triggered_stops;     // stop orders the request activated, in activation order
+    std::span<const OrderId> self_trade_cancels;  // resting orders cancelled by self-trade prevention
     std::string_view message;
 };
 
@@ -105,9 +127,12 @@ struct RestingOrderView {
     OrderId order_id{};
     Side side{Side::Buy};
     Price price{};
-    Quantity remaining_quantity{};
+    Quantity remaining_quantity{};  // total open quantity, including any hidden iceberg reserve
     SequenceNumber sequence{};
     TimeInForce time_in_force{TimeInForce::GoodTillCancel};
+    Quantity visible_quantity{};  // the displayed part; equals remaining_quantity unless the order is an iceberg
+    Quantity display_quantity{};
+    OwnerId owner{};
 };
 
 struct PriceLevelView {
@@ -125,6 +150,7 @@ struct BookSnapshot {
 const char* to_string(Side side) noexcept;
 const char* to_string(OrderType type) noexcept;
 const char* to_string(TimeInForce time_in_force) noexcept;
+const char* to_string(SelfTradePrevention mode) noexcept;
 const char* to_string(RejectReason reason) noexcept;
 std::string format_price(Price price);
 

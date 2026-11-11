@@ -1,5 +1,6 @@
 #include "tradematch/order_book.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -86,6 +87,9 @@ void expect_book_invariants(const tradematch::OrderBook& book) {
                 expect_equal(indexed_order.sequence, order.sequence, "Order sequence should match the indexed view.");
                 expect(indexed_order.time_in_force == order.time_in_force,
                        "Order time in force should match the indexed view.");
+                expect_equal(indexed_order.visible_quantity,
+                             order.visible_quantity,
+                             "Displayed quantity should match the indexed view.");
 
                 if (has_previous_sequence) {
                     expect(previous_sequence < order.sequence, "Order sequence should increase within a price level.");
@@ -93,7 +97,9 @@ void expect_book_invariants(const tradematch::OrderBook& book) {
 
                 previous_sequence = order.sequence;
                 has_previous_sequence = true;
-                level_quantity_sum += order.remaining_quantity;
+                expect(order.visible_quantity <= order.remaining_quantity,
+                       "Displayed quantity should never exceed the open quantity.");
+                level_quantity_sum += order.visible_quantity;
             }
 
             expect_equal(level.total_quantity, level_quantity_sum, "Level quantity should match the sum of orders.");
@@ -603,6 +609,317 @@ void test_tiny_capacity_grows_transparently() {
     expect_equal(book.order_count(), std::size_t{0}, "The sweep should empty the book.");
 }
 
+tradematch::OrderRequest stop_order(tradematch::OrderId id,
+                                    tradematch::Side side,
+                                    tradematch::Quantity quantity,
+                                    tradematch::Price stop_price,
+                                    tradematch::Price limit_price = 0) {
+    tradematch::OrderRequest order{id,
+                                   side,
+                                   limit_price == 0 ? tradematch::OrderType::Stop : tradematch::OrderType::StopLimit,
+                                   quantity,
+                                   limit_price};
+    order.stop_price = stop_price;
+    return order;
+}
+
+tradematch::OrderRequest iceberg(tradematch::OrderId id,
+                                 tradematch::Side side,
+                                 tradematch::Quantity quantity,
+                                 tradematch::Price price,
+                                 tradematch::Quantity display) {
+    tradematch::OrderRequest order{id, side, tradematch::OrderType::Limit, quantity, price};
+    order.display_quantity = display;
+    return order;
+}
+
+tradematch::OrderRequest owned(tradematch::OrderRequest order,
+                               tradematch::OwnerId owner,
+                               tradematch::SelfTradePrevention mode = tradematch::SelfTradePrevention::None) {
+    order.owner = owner;
+    order.self_trade_prevention = mode;
+    return order;
+}
+
+void test_stop_order_waits_then_triggers_on_last_trade() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Sell, OrderType::Limit, 10, 10000});
+    submit_checked(book, {2, Side::Sell, OrderType::Limit, 10, 10100});
+
+    const auto pending = submit_checked(book, stop_order(3, Side::Buy, 10, 10000));
+    expect(pending.accepted && pending.pending_trigger, "Without a trade at 100.00 the stop should wait.");
+    expect(book.has_stop_order(3) && !book.has_order(3), "Pending stops are not visible in the book.");
+    expect_equal(book.stop_order_count(), std::size_t{1}, "One stop should be pending.");
+
+    const auto trigger = submit_checked(book, {4, Side::Buy, OrderType::Limit, 10, 10000});
+    expect(trigger.triggered_stops.size() == 1U && trigger.triggered_stops.front() == 3U,
+           "The trade at 100.00 should trigger the stop.");
+    expect_equal(trigger.trades.size(), std::size_t{2}, "The request reports its own trade and the stop's trade.");
+    expect_equal(trigger.trades.back().buy_order_id, tradematch::OrderId{3}, "The stop should buy as a market order.");
+    expect_equal(trigger.trades.back().price, tradematch::Price{10100}, "The stop should lift the next ask.");
+    expect(!book.has_stop_order(3) && book.order_count() == 0U, "The stop and both asks should be gone.");
+    expect_equal(book.last_trade_price().value_or(0), tradematch::Price{10100}, "Last trade price should update.");
+}
+
+void test_stop_limit_rests_after_triggering() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Buy, OrderType::Limit, 10, 9900});
+    submit_checked(book, stop_order(2, Side::Sell, 20, 9900, 9950));
+
+    const auto trigger = submit_checked(book, {3, Side::Sell, OrderType::Limit, 10, 9900});
+    expect(trigger.triggered_stops.size() == 1U, "The trade at 99.00 should trigger the sell stop-limit.");
+    const auto rested = expect_value(book.get_order(2), "The activated stop-limit should rest at its limit.");
+    expect_equal(rested.price, tradematch::Price{9950}, "It should rest at its limit price, not the stop price.");
+    expect_equal(book.best_ask().value_or(0), tradematch::Price{9950}, "It becomes the best ask.");
+}
+
+void test_stop_already_through_the_market_triggers_immediately() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Sell, OrderType::Limit, 10, 10000});
+    submit_checked(book, {2, Side::Buy, OrderType::Limit, 5, 10000});
+    expect_equal(book.last_trade_price().value_or(0), tradematch::Price{10000}, "A trade sets the last price.");
+
+    const auto immediate = submit_checked(book, stop_order(3, Side::Buy, 5, 9900));
+    expect(!immediate.pending_trigger && immediate.triggered_stops.size() == 1U,
+           "A buy stop below the last trade should trigger on entry.");
+    expect_equal(immediate.filled_quantity, tradematch::Quantity{5}, "It executes like a market order.");
+}
+
+void test_stop_cascade_triggers_in_price_then_time_order() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    for (tradematch::OrderId id = 1; id <= 4; ++id) {
+        submit_checked(book, {id, Side::Sell, OrderType::Limit, 10, 10000 + static_cast<tradematch::Price>(id) * 100});
+    }
+    submit_checked(book, stop_order(11, Side::Buy, 10, 10200));  // arrives first, higher trigger
+    submit_checked(book, stop_order(12, Side::Buy, 10, 10100));
+    submit_checked(book, stop_order(13, Side::Buy, 10, 10100));  // same trigger as 12, later arrival
+
+    const auto cascade = submit_checked(book, {20, Side::Buy, OrderType::Market, 10, 0});
+    const std::vector<tradematch::OrderId> expected{12, 13, 11};
+    expect(std::ranges::equal(cascade.triggered_stops, expected),
+           "Stops should trigger by trigger price, then arrival, each one moving the price further.");
+    expect_equal(cascade.trades.size(), std::size_t{4}, "Every ask should be lifted by the cascade.");
+    expect_equal(book.stop_order_count(), std::size_t{0}, "No stop should remain.");
+}
+
+void test_first_trade_triggers_both_sides_by_arrival() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    // Before any trade, stops on both sides wait. The first trade at 100.00 triggers both at once, and the earlier
+    // arrival (the buy stop) goes first. The sell stop-limit then rests at 105.00 without trading, so it is still
+    // triggered after the buy stop moves nothing.
+    submit_checked(book, stop_order(1, Side::Buy, 5, 9900));
+    submit_checked(book, stop_order(2, Side::Sell, 5, 10100, 10500));
+    submit_checked(book, {3, Side::Sell, OrderType::Limit, 20, 10000});
+
+    const auto first = submit_checked(book, {4, Side::Buy, OrderType::Limit, 5, 10000});
+    const std::vector<tradematch::OrderId> expected{1, 2};
+    expect(std::ranges::equal(first.triggered_stops, expected),
+           "When both sides trigger together, the earlier arrival goes first.");
+    expect_equal(expect_value(book.get_order(2), "The sell stop-limit should rest.").price,
+                 tradematch::Price{10500},
+                 "It rests at its limit price.");
+}
+
+void test_stop_orders_can_be_cancelled_and_expire() {
+    using tradematch::OrderType;
+    using tradematch::RejectReason;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, stop_order(1, Side::Buy, 10, 10500));
+    auto day_stop = stop_order(2, Side::Sell, 10, 9500);
+    day_stop.time_in_force = TimeInForce::Day;
+    submit_checked(book, day_stop);
+
+    expect(submit_checked(book, {1, Side::Sell, OrderType::Limit, 10, 10000}).reject_reason ==
+               RejectReason::DuplicateOrderId,
+           "A pending stop's ID is in use.");
+    expect(
+        replace_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10000}).reject_reason == RejectReason::UnknownOrder,
+        "Replace applies to resting orders, not pending stops.");
+
+    const auto cancel = cancel_checked(book, 1);
+    expect(cancel.cancelled && cancel.cancelled_quantity == 10U, "Pending stops can be cancelled.");
+    expect(book.expire_day_orders() == std::vector<tradematch::OrderId>{2}, "DAY stops expire at end of day.");
+    expect_equal(book.stop_order_count(), std::size_t{0}, "No stop should remain.");
+}
+
+void test_stop_validation() {
+    using tradematch::OrderType;
+    using tradematch::RejectReason;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    auto priced_stop = stop_order(1, Side::Buy, 10, 10100);
+    priced_stop.price = 10200;
+    expect(book.submit(priced_stop).reject_reason == RejectReason::InvalidPrice, "Stop orders become market orders.");
+    expect(book.submit(stop_order(1, Side::Buy, 10, 0)).reject_reason == RejectReason::InvalidStopPrice,
+           "Stops need a stop price.");
+    tradematch::OrderRequest limit{1, Side::Buy, OrderType::Limit, 10, 10000};
+    limit.stop_price = 10100;
+    expect(book.submit(limit).reject_reason == RejectReason::InvalidStopPrice, "Plain orders cannot have one.");
+    expect(book.submit(stop_order(1, Side::Buy, 10, 10100, 10150)).accepted, "A valid stop-limit is accepted.");
+}
+
+void test_iceberg_displays_one_tranche() {
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    submit_checked(book, iceberg(1, Side::Sell, 100, 10000, 20));
+
+    const auto order = expect_value(book.get_order(1), "The iceberg should rest.");
+    expect_equal(order.remaining_quantity, tradematch::Quantity{100}, "The full quantity remains open.");
+    expect_equal(order.visible_quantity, tradematch::Quantity{20}, "Only one tranche is displayed.");
+    expect_equal(book.snapshot().asks.front().total_quantity, tradematch::Volume{20}, "Depth shows the tranche only.");
+
+    const auto cancel = cancel_checked(book, 1);
+    expect_equal(cancel.cancelled_quantity, tradematch::Quantity{100}, "Cancel removes hidden quantity too.");
+}
+
+void test_iceberg_refresh_goes_to_the_back_of_the_queue() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    submit_checked(book, iceberg(1, Side::Sell, 30, 10000, 10));
+    submit_checked(book, {2, Side::Sell, OrderType::Limit, 10, 10000});
+
+    const auto sweep = submit_checked(book, {3, Side::Buy, OrderType::Limit, 25, 10000});
+    expect_equal(sweep.trades.size(), std::size_t{3}, "The sweep should take three fills.");
+    expect_equal(sweep.trades[0].sell_order_id, tradematch::OrderId{1}, "The first tranche fills first.");
+    expect_equal(sweep.trades[1].sell_order_id, tradematch::OrderId{2}, "The refresh queues behind order 2.");
+    expect_equal(sweep.trades[2].sell_order_id, tradematch::OrderId{1}, "Then the refreshed tranche fills.");
+    expect_equal(sweep.trades[2].quantity, tradematch::Quantity{5}, "Only what is needed is taken.");
+
+    const auto rest = expect_value(book.get_order(1), "The iceberg keeps its last tranche and reserve.");
+    expect_equal(rest.remaining_quantity, tradematch::Quantity{15}, "15 of 30 should remain open.");
+    expect_equal(rest.visible_quantity, tradematch::Quantity{5}, "5 of the second tranche is still displayed.");
+}
+
+void test_iceberg_reserve_counts_for_fill_or_kill() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, iceberg(1, Side::Sell, 100, 10000, 10));
+
+    const auto filled = submit_checked(book, {2, Side::Buy, OrderType::Limit, 60, 10000, TimeInForce::FillOrKill});
+    expect(!filled.expired && filled.filled_quantity == 60U, "Hidden quantity is executable for a FOK.");
+    expect_equal(filled.trades.size(), std::size_t{6}, "It fills tranche by tranche.");
+    const auto killed = submit_checked(book, {3, Side::Buy, OrderType::Limit, 41, 10000, TimeInForce::FillOrKill});
+    expect(killed.expired && killed.trades.empty(), "Asking for more than the reserve still kills the FOK.");
+}
+
+void test_iceberg_validation_and_amend() {
+    using tradematch::OrderType;
+    using tradematch::RejectReason;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    expect(book.submit(iceberg(1, Side::Buy, 10, 10000, 20)).reject_reason == RejectReason::InvalidDisplayQuantity,
+           "The display cannot exceed the order.");
+    auto market_iceberg = iceberg(1, Side::Buy, 10, 0, 5);
+    market_iceberg.type = OrderType::Market;
+    expect(book.submit(market_iceberg).reject_reason == RejectReason::InvalidDisplayQuantity,
+           "Market orders cannot be icebergs.");
+    auto ioc_iceberg = iceberg(1, Side::Buy, 10, 10000, 5);
+    ioc_iceberg.time_in_force = TimeInForce::ImmediateOrCancel;
+    expect(book.submit(ioc_iceberg).reject_reason == RejectReason::InvalidDisplayQuantity,
+           "Icebergs must be able to rest.");
+
+    submit_checked(book, iceberg(1, Side::Buy, 100, 10000, 20));
+    submit_checked(book, {2, Side::Buy, OrderType::Limit, 10, 10000});
+    const auto amend = replace_checked(book, iceberg(1, Side::Buy, 30, 10000, 20));
+    expect(amend.priority_kept, "Shrinking an iceberg at the same price keeps its priority.");
+    const auto amended = expect_value(book.get_order(1), "The iceberg should still rest.");
+    expect_equal(amended.visible_quantity, tradematch::Quantity{20}, "The reduction comes out of the reserve.");
+    expect_equal(amended.remaining_quantity, tradematch::Quantity{30}, "The new open quantity applies.");
+
+    const auto redisplay = replace_checked(book, iceberg(1, Side::Buy, 30, 10000, 10));
+    expect(redisplay.replaced && !redisplay.priority_kept, "Changing the display size is a new order.");
+}
+
+void test_self_trade_prevention_modes() {
+    using tradematch::OrderType;
+    using tradematch::SelfTradePrevention;
+    using tradematch::Side;
+
+    const auto setup = [](tradematch::OrderBook& book) {
+        submit_checked(book, owned({1, Side::Sell, OrderType::Limit, 10, 10000}, 7));
+        submit_checked(book, owned({2, Side::Sell, OrderType::Limit, 10, 10000}, 8));
+    };
+
+    {
+        tradematch::OrderBook book;
+        setup(book);
+        const auto allowed = submit_checked(book, owned({3, Side::Buy, OrderType::Limit, 10, 10000}, 7));
+        expect(allowed.trades.size() == 1U && allowed.trades.front().sell_order_id == 1U,
+               "Without prevention, a self-trade is allowed.");
+    }
+    {
+        tradematch::OrderBook book;
+        setup(book);
+        const auto newest =
+            submit_checked(book,
+                           owned({3, Side::Buy, OrderType::Limit, 15, 10000}, 7, SelfTradePrevention::CancelNewest));
+        expect(newest.self_trade_prevented && newest.expired && newest.trades.empty(),
+               "Cancel-newest kills the incoming order at the first self-match.");
+        expect(book.has_order(1) && book.has_order(2), "Resting orders are untouched.");
+    }
+    {
+        tradematch::OrderBook book;
+        setup(book);
+        const auto oldest =
+            submit_checked(book,
+                           owned({3, Side::Buy, OrderType::Limit, 15, 10000}, 7, SelfTradePrevention::CancelOldest));
+        expect(oldest.self_trade_cancels.size() == 1U && oldest.self_trade_cancels.front() == 1U,
+               "Cancel-oldest removes the resting self order.");
+        expect(oldest.trades.size() == 1U && oldest.trades.front().sell_order_id == 2U, "Then keeps matching.");
+        expect(oldest.rested && !oldest.self_trade_prevented, "The remainder rests normally.");
+    }
+    {
+        tradematch::OrderBook book;
+        setup(book);
+        const auto both =
+            submit_checked(book,
+                           owned({3, Side::Buy, OrderType::Limit, 15, 10000}, 7, SelfTradePrevention::CancelBoth));
+        expect(both.self_trade_cancels.size() == 1U && both.self_trade_prevented && both.trades.empty(),
+               "Cancel-both removes both orders.");
+        expect(!book.has_order(1) && book.has_order(2) && !book.has_order(3), "Only the other owner's order remains.");
+    }
+}
+
+void test_fill_or_kill_respects_self_trade_prevention() {
+    using tradematch::OrderType;
+    using tradematch::SelfTradePrevention;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, owned({1, Side::Sell, OrderType::Limit, 10, 10000}, 7));
+    submit_checked(book, owned({2, Side::Sell, OrderType::Limit, 10, 10000}, 8));
+
+    auto newest = owned({3, Side::Buy, OrderType::Limit, 10, 10000, TimeInForce::FillOrKill},
+                        7,
+                        SelfTradePrevention::CancelNewest);
+    const auto killed = submit_checked(book, newest);
+    expect(killed.expired && killed.trades.empty() && book.order_count() == 2U,
+           "A FOK that would be stopped by its own order is killed before touching the book.");
+
+    auto oldest = owned({4, Side::Buy, OrderType::Limit, 10, 10000, TimeInForce::FillOrKill},
+                        7,
+                        SelfTradePrevention::CancelOldest);
+    const auto filled = submit_checked(book, oldest);
+    expect(!filled.expired && filled.filled_quantity == 10U, "Cancel-oldest FOKs fill from other owners.");
+    expect(filled.self_trade_cancels.size() == 1U && !book.has_order(1), "Its own resting order is cancelled.");
+}
+
 void test_formatting_helpers() {
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Buy)}, std::string{"BUY"}, "Buy side label.");
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Sell)}, std::string{"SELL"}, "Sell side label.");
@@ -626,7 +943,21 @@ void test_formatting_helpers() {
         {RejectReason::InvalidTimeInForce, "INVALID_TIME_IN_FORCE"},
         {RejectReason::InvalidPostOnly, "INVALID_POST_ONLY"},
         {RejectReason::PostOnlyWouldCross, "POST_ONLY_WOULD_CROSS"},
+        {RejectReason::InvalidStopPrice, "INVALID_STOP_PRICE"},
+        {RejectReason::InvalidDisplayQuantity, "INVALID_DISPLAY_QUANTITY"},
     };
+    for (const auto& [mode, name] : std::vector<std::pair<tradematch::SelfTradePrevention, std::string>>{
+             {tradematch::SelfTradePrevention::None, "NONE"},
+             {tradematch::SelfTradePrevention::CancelNewest, "CANCEL_NEWEST"},
+             {tradematch::SelfTradePrevention::CancelOldest, "CANCEL_OLDEST"},
+             {tradematch::SelfTradePrevention::CancelBoth, "CANCEL_BOTH"},
+         }) {
+        expect_equal(std::string{tradematch::to_string(mode)}, name, "Self-trade prevention names should be stable.");
+    }
+    expect_equal(std::string{tradematch::to_string(tradematch::OrderType::Stop)}, std::string{"STOP"}, "Stop label.");
+    expect_equal(std::string{tradematch::to_string(tradematch::OrderType::StopLimit)},
+                 std::string{"STOP_LIMIT"},
+                 "Stop-limit label.");
     for (const auto& [tif, name] : std::vector<std::pair<tradematch::TimeInForce, std::string>>{
              {tradematch::TimeInForce::GoodTillCancel, "GTC"},
              {tradematch::TimeInForce::Day, "DAY"},
@@ -673,6 +1004,20 @@ int run_all_tests() {
         {"post_only_never_takes_liquidity", test_post_only_never_takes_liquidity},
         {"replace_requires_a_resting_time_in_force", test_replace_requires_a_resting_time_in_force},
         {"day_orders_expire_at_end_of_day", test_day_orders_expire_at_end_of_day},
+        {"stop_order_waits_then_triggers_on_last_trade", test_stop_order_waits_then_triggers_on_last_trade},
+        {"stop_limit_rests_after_triggering", test_stop_limit_rests_after_triggering},
+        {"stop_already_through_the_market_triggers_immediately",
+         test_stop_already_through_the_market_triggers_immediately},
+        {"stop_cascade_triggers_in_price_then_time_order", test_stop_cascade_triggers_in_price_then_time_order},
+        {"first_trade_triggers_both_sides_by_arrival", test_first_trade_triggers_both_sides_by_arrival},
+        {"stop_orders_can_be_cancelled_and_expire", test_stop_orders_can_be_cancelled_and_expire},
+        {"stop_validation", test_stop_validation},
+        {"iceberg_displays_one_tranche", test_iceberg_displays_one_tranche},
+        {"iceberg_refresh_goes_to_the_back_of_the_queue", test_iceberg_refresh_goes_to_the_back_of_the_queue},
+        {"iceberg_reserve_counts_for_fill_or_kill", test_iceberg_reserve_counts_for_fill_or_kill},
+        {"iceberg_validation_and_amend", test_iceberg_validation_and_amend},
+        {"self_trade_prevention_modes", test_self_trade_prevention_modes},
+        {"fill_or_kill_respects_self_trade_prevention", test_fill_or_kill_respects_self_trade_prevention},
         {"replace_rejects_invalid_request_without_removing_resting_order",
          test_replace_rejects_invalid_request_without_removing_resting_order},
         {"replace_rejects_side_change", test_replace_rejects_side_change},

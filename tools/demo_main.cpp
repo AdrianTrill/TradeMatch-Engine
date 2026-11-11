@@ -55,6 +55,9 @@ void print_submit_result(const SubmitResult& result) {
     std::cout << '\n';
     std::cout << "  " << result.message << '\n';
     print_trades(result.trades);
+    for (const auto stop_id : result.triggered_stops) {
+        std::cout << "  triggered stop order " << stop_id << '\n';
+    }
 }
 
 void print_cancel_result(const CancelResult& result) {
@@ -83,6 +86,12 @@ void describe(const char* action, const OrderRequest& order) {
     }
     if (order.post_only) {
         std::cout << " post_only";
+    }
+    if (order.stop_price != 0) {
+        std::cout << " stop=" << tradematch::format_price(order.stop_price);
+    }
+    if (order.display_quantity != 0U) {
+        std::cout << " display=" << order.display_quantity;
     }
     std::cout << '\n';
 }
@@ -123,6 +132,18 @@ int main() {
 
     print_cancel_result(book.cancel(2));
     print_snapshot(book.snapshot());
+    std::cout << '\n';
+
+    // An iceberg shows 20 of its 100 shares. A buy stop waits above the market. A buy that eats two tranches trades
+    // at 101.50, which triggers the stop, and the stop's market order takes more of the iceberg.
+    OrderRequest iceberg{9, Side::Sell, OrderType::Limit, 100, 10150};
+    iceberg.display_quantity = 20;
+    submit_and_print(book, iceberg);
+
+    OrderRequest buy_stop{10, Side::Buy, OrderType::Stop, 30, 0};
+    buy_stop.stop_price = 10150;
+    submit_and_print(book, buy_stop);
+    submit_and_print(book, OrderRequest{11, Side::Buy, OrderType::Limit, 30, 10150});
 
     return 0;
 }

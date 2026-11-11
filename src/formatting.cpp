@@ -22,6 +22,10 @@ const char* to_string(OrderType type) noexcept {
             return "LIMIT";
         case OrderType::Market:
             return "MARKET";
+        case OrderType::Stop:
+            return "STOP";
+        case OrderType::StopLimit:
+            return "STOP_LIMIT";
     }
 
     return "UNKNOWN";
@@ -37,6 +41,21 @@ const char* to_string(TimeInForce time_in_force) noexcept {
             return "IOC";
         case TimeInForce::FillOrKill:
             return "FOK";
+    }
+
+    return "UNKNOWN";
+}
+
+const char* to_string(SelfTradePrevention mode) noexcept {
+    switch (mode) {
+        case SelfTradePrevention::None:
+            return "NONE";
+        case SelfTradePrevention::CancelNewest:
+            return "CANCEL_NEWEST";
+        case SelfTradePrevention::CancelOldest:
+            return "CANCEL_OLDEST";
+        case SelfTradePrevention::CancelBoth:
+            return "CANCEL_BOTH";
     }
 
     return "UNKNOWN";
@@ -66,6 +85,10 @@ const char* to_string(RejectReason reason) noexcept {
             return "INVALID_POST_ONLY";
         case RejectReason::PostOnlyWouldCross:
             return "POST_ONLY_WOULD_CROSS";
+        case RejectReason::InvalidStopPrice:
+            return "INVALID_STOP_PRICE";
+        case RejectReason::InvalidDisplayQuantity:
+            return "INVALID_DISPLAY_QUANTITY";
     }
 
     return "UNKNOWN";

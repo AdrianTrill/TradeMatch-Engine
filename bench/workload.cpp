@@ -164,6 +164,13 @@ private:
         command.order.type = OrderType::Limit;
         command.order.quantity = lot_size();
         command.order.price = passive_price(target.side);
+
+        // The v1 baseline treats every replace as cancel plus resubmit, while v2 amends same-price reductions in place.
+        // Moving such replaces one tick deeper keeps both engines on identical semantics, so they do identical work.
+        const auto current = scratch_.get_order(target.order_id);
+        if (current && command.order.price == current->price && command.order.quantity <= current->remaining_quantity) {
+            command.order.price += target.side == Side::Buy ? -1 : 1;
+        }
         return command;
     }
 

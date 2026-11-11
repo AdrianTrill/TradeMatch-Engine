@@ -1,6 +1,7 @@
 #ifndef TRADEMATCH_DETAIL_ORDER_INDEX_HPP
 #define TRADEMATCH_DETAIL_ORDER_INDEX_HPP
 
+#include "tradematch/detail/config.hpp"
 #include "tradematch/types.hpp"
 
 #include <algorithm>
@@ -44,7 +45,7 @@ public:
         return slots_.size() / 2;
     }
 
-    Value find(OrderId key) const noexcept {
+    TRADEMATCH_HOT_INLINE Value find(OrderId key) const noexcept {
         if (key == kEmptyKey) {
             return kMissing;
         }
@@ -59,12 +60,12 @@ public:
         }
     }
 
-    bool contains(OrderId key) const noexcept {
+    TRADEMATCH_HOT_INLINE bool contains(OrderId key) const noexcept {
         return find(key) != kMissing;
     }
 
     // Inserts a key that is not present. Key 0 is reserved as the empty marker.
-    void insert(OrderId key, Value value) {
+    TRADEMATCH_HOT_INLINE void insert(OrderId key, Value value) {
         if ((size_ + 1) * 2 > slots_.size()) {
             rehash(slots_.size() * 2);
         }
@@ -73,7 +74,7 @@ public:
     }
 
     // Removes `key` and returns whether it was present.
-    bool erase(OrderId key) noexcept {
+    TRADEMATCH_HOT_INLINE bool erase(OrderId key) noexcept {
         if (key == kEmptyKey) {
             return false;
         }
@@ -110,15 +111,15 @@ private:
         Value value{kMissing};
     };
 
-    std::size_t home(OrderId key) const noexcept {
+    TRADEMATCH_HOT_INLINE std::size_t home(OrderId key) const noexcept {
         return static_cast<std::size_t>((key * kFibonacciMultiplier) >> shift_);
     }
 
-    std::size_t next(std::size_t slot) const noexcept {
+    TRADEMATCH_HOT_INLINE std::size_t next(std::size_t slot) const noexcept {
         return (slot + 1) & mask_;
     }
 
-    void place(OrderId key, Value value) noexcept {
+    TRADEMATCH_HOT_INLINE void place(OrderId key, Value value) noexcept {
         std::size_t slot = home(key);
         while (slots_[slot].key != kEmptyKey) {
             slot = next(slot);
