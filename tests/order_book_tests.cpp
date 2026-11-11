@@ -945,6 +945,7 @@ void test_formatting_helpers() {
         {RejectReason::PostOnlyWouldCross, "POST_ONLY_WOULD_CROSS"},
         {RejectReason::InvalidStopPrice, "INVALID_STOP_PRICE"},
         {RejectReason::InvalidDisplayQuantity, "INVALID_DISPLAY_QUANTITY"},
+        {RejectReason::UnknownSymbol, "UNKNOWN_SYMBOL"},
     };
     for (const auto& [mode, name] : std::vector<std::pair<tradematch::SelfTradePrevention, std::string>>{
              {tradematch::SelfTradePrevention::None, "NONE"},

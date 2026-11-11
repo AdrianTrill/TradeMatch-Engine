@@ -1,6 +1,7 @@
 #ifndef TRADEMATCH_ORDER_BOOK_HPP
 #define TRADEMATCH_ORDER_BOOK_HPP
 
+#include "tradematch/book_listener.hpp"
 #include "tradematch/detail/order_index.hpp"
 #include "tradematch/types.hpp"
 
@@ -8,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string_view>
 #include <vector>
 
@@ -48,6 +50,12 @@ public:
 
     // End-of-day processing: cancels every resting or pending DAY order and returns their IDs in ascending order.
     std::vector<OrderId> expire_day_orders();
+
+    // Attaches a market data listener (or detaches it with nullptr). The book does no market data bookkeeping while
+    // no listener is attached.
+    void set_listener(BookListener* listener) noexcept {
+        listener_ = listener;
+    }
 
     bool has_order(OrderId order_id) const noexcept;
     bool has_stop_order(OrderId order_id) const noexcept;
@@ -120,6 +128,13 @@ private:
     // next stop to trigger on each side is always at the back.
     using StopLadder = std::vector<StopEntry>;
 
+    struct TouchedLevel {
+        Side side{Side::Buy};
+        Price price{};
+
+        auto operator<=>(const TouchedLevel&) const = default;
+    };
+
     struct Rejection {
         RejectReason reason{RejectReason::None};
         std::string_view message;
@@ -142,7 +157,9 @@ private:
     }
 
     void begin_request() noexcept;
-    void finish_request(SubmitResult& result) const noexcept;
+    void finish_request(SubmitResult& result);
+    void touch_level(Side side, Price price);
+    void publish(std::span<const Trade> trades);
     Rejection validate(const OrderRequest& order, bool replacing) const noexcept;
     static Rejection validate_advanced(const OrderRequest& order) noexcept;
     void execute(const OrderRequest& order, SubmitResult& result);
@@ -194,6 +211,8 @@ private:
     std::vector<OrderId> triggered_;
     std::vector<OrderId> self_trade_cancels_;
     std::optional<Price> last_trade_price_;
+    BookListener* listener_{nullptr};
+    std::vector<TouchedLevel> touched_levels_;
     SequenceNumber next_sequence_{1};
     TradeId next_trade_id_{1};
 };

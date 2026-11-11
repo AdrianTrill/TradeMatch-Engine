@@ -49,18 +49,19 @@ enum class SelfTradePrevention : std::uint8_t {
 // Why a request was rejected. Every rejection leaves the book unchanged.
 enum class RejectReason : std::uint8_t {
     None,
-    InvalidOrderId,         // order ID 0 is reserved
-    InvalidQuantity,        // quantity must be positive
-    InvalidPrice,           // limit prices must be positive, market orders must use price 0
-    DuplicateOrderId,       // the ID already belongs to a resting order
-    UnknownOrder,           // cancel or replace of an ID that is not resting
-    SideChange,             // replace may not change the side
-    TypeChange,             // replace must keep the limit order type
-    InvalidTimeInForce,     // a replacement must be able to rest (GTC or DAY)
-    InvalidPostOnly,        // post-only requires a limit order that can rest (GTC or DAY)
-    PostOnlyWouldCross,     // a post-only order may not take liquidity
-    InvalidStopPrice,       // stop orders need a positive stop price; other orders must leave it at 0
-    InvalidDisplayQuantity  // icebergs need a limit price, a resting time in force, and display <= quantity
+    InvalidOrderId,          // order ID 0 is reserved
+    InvalidQuantity,         // quantity must be positive
+    InvalidPrice,            // limit prices must be positive, market orders must use price 0
+    DuplicateOrderId,        // the ID already belongs to a resting order
+    UnknownOrder,            // cancel or replace of an ID that is not resting
+    SideChange,              // replace may not change the side
+    TypeChange,              // replace must keep the limit order type
+    InvalidTimeInForce,      // a replacement must be able to rest (GTC or DAY)
+    InvalidPostOnly,         // post-only requires a limit order that can rest (GTC or DAY)
+    PostOnlyWouldCross,      // a post-only order may not take liquidity
+    InvalidStopPrice,        // stop orders need a positive stop price; other orders must leave it at 0
+    InvalidDisplayQuantity,  // icebergs need a limit price, a resting time in force, and display <= quantity
+    UnknownSymbol            // a matching engine request named a symbol that does not exist
 };
 
 struct OrderRequest {

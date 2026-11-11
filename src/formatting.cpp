@@ -89,6 +89,8 @@ const char* to_string(RejectReason reason) noexcept {
             return "INVALID_STOP_PRICE";
         case RejectReason::InvalidDisplayQuantity:
             return "INVALID_DISPLAY_QUANTITY";
+        case RejectReason::UnknownSymbol:
+            return "UNKNOWN_SYMBOL";
     }
 
     return "UNKNOWN";

@@ -72,6 +72,7 @@ OrderBook::OrderBook(const BookCapacity& capacity) : index_(capacity.orders), st
     trades_.reserve(capacity.trades_per_call);
     triggered_.reserve(capacity.stop_orders);
     self_trade_cancels_.reserve(capacity.trades_per_call);
+    touched_levels_.reserve(capacity.price_levels);
 }
 
 TRADEMATCH_HOT_INLINE OrderBook::Rejection OrderBook::validate(const OrderRequest& order,
@@ -126,10 +127,42 @@ TRADEMATCH_HOT_INLINE void OrderBook::begin_request() noexcept {
     self_trade_cancels_.clear();
 }
 
-TRADEMATCH_HOT_INLINE void OrderBook::finish_request(SubmitResult& result) const noexcept {
+TRADEMATCH_HOT_INLINE void OrderBook::finish_request(SubmitResult& result) {
     result.trades = trades_;
     result.triggered_stops = triggered_;
     result.self_trade_cancels = self_trade_cancels_;
+    if (listener_ != nullptr) {
+        publish(trades_);
+    }
+}
+
+TRADEMATCH_HOT_INLINE void OrderBook::touch_level(Side side, Price price) {
+    if (listener_ != nullptr) {
+        touched_levels_.push_back(TouchedLevel{side, price});
+    }
+}
+
+// Emits the request's trades, then the final state of every level it changed, bids before asks and in ascending price
+// order, so the output is deterministic.
+TRADEMATCH_COLD void OrderBook::publish(std::span<const Trade> trades) {
+    for (const Trade& trade : trades) {
+        listener_->on_trade(trade);
+    }
+
+    std::ranges::sort(touched_levels_);
+    const auto duplicates = std::ranges::unique(touched_levels_);
+    touched_levels_.erase(duplicates.begin(), duplicates.end());
+    for (const TouchedLevel& touched : touched_levels_) {
+        LevelUpdate update{touched.side, touched.price, 0U, 0U};
+        const auto entry = find_ladder_entry(touched.side, touched.price);
+        if (entry != ladder(touched.side).end()) {
+            const PriceLevel& level = levels_[entry->level];
+            update.quantity = level.total_quantity;
+            update.order_count = level.order_count;
+        }
+        listener_->on_level_update(update);
+    }
+    touched_levels_.clear();
 }
 
 SubmitResult OrderBook::submit(const OrderRequest& order) {
@@ -237,6 +270,9 @@ CancelResult OrderBook::cancel(OrderId order_id) {
         result.cancelled_quantity = node.remaining + node.hidden;
         result.message = "Order cancelled.";
         remove_resting(node_slot);
+        if (listener_ != nullptr) {
+            publish({});
+        }
         return result;
     }
 
@@ -303,6 +339,7 @@ ReplaceResult OrderBook::replace(const OrderRequest& replacement) {
         existing.remaining = visible;
         existing.hidden = hidden;
         existing.time_in_force = replacement.time_in_force;
+        touch_level(existing.side, level.price);
 
         result.replaced = true;
         result.priority_kept = true;
@@ -370,6 +407,9 @@ std::vector<OrderId> OrderBook::expire_day_orders() {
         remove_stop(stop_slot);
     }
     std::ranges::sort(expired);
+    if (listener_ != nullptr) {
+        publish({});
+    }
     return expired;
 }
 
@@ -510,6 +550,7 @@ void OrderBook::match(const OrderRequest& order, Quantity& remaining, bool& stop
         }
 
         PriceLevel& level = levels_[best.level];
+        touch_level(level.side, best.price);
         while (remaining > 0U && level.head != kNone) {
             const Slot node_slot = level.head;
             OrderNode& resting = nodes_[node_slot];
@@ -623,6 +664,7 @@ void OrderBook::rest(const OrderRequest& order, Quantity remaining, SequenceNumb
     ++level.order_count;
     level.total_quantity += visible;
     level.hidden_quantity += remaining - visible;
+    touch_level(order.side, order.price);
 
     index_.insert(order.order_id, node_slot);
 }
@@ -651,6 +693,7 @@ TRADEMATCH_HOT_INLINE void OrderBook::detach_node(Slot node_slot, PriceLevel& le
 void OrderBook::remove_resting(Slot node_slot) {
     const Slot level_slot = nodes_[node_slot].level;
     PriceLevel& level = levels_[level_slot];
+    touch_level(level.side, level.price);
     detach_node(node_slot, level);
     if (level.order_count == 0U) {
         remove_level(level_slot);

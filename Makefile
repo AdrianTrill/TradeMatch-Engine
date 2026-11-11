@@ -5,7 +5,7 @@ DEPFLAGS = -MMD -MP
 BUILD_DIR ?= build
 OBJ_DIR := $(BUILD_DIR)/obj
 
-ENGINE_SRC := src/formatting.cpp src/order_book.cpp
+ENGINE_SRC := src/formatting.cpp src/market_data.cpp src/matching_engine.cpp src/order_book.cpp
 ENGINE_OBJ := $(ENGINE_SRC:%.cpp=$(OBJ_DIR)/%.o)
 
 DEMO_BIN := $(BUILD_DIR)/tradematch_demo
@@ -15,6 +15,7 @@ DIFF_TEST_BIN := $(BUILD_DIR)/tradematch_differential_tests
 FUZZ_BIN := $(BUILD_DIR)/tradematch_fuzz_standalone
 BENCH_TEST_BIN := $(BUILD_DIR)/tradematch_bench_tests
 INDEX_TEST_BIN := $(BUILD_DIR)/tradematch_order_index_tests
+MARKET_DATA_TEST_BIN := $(BUILD_DIR)/tradematch_market_data_tests
 ALLOC_TEST_BIN := $(BUILD_DIR)/tradematch_allocation_tests
 
 SOURCES = $(shell git ls-files '*.cpp' '*.hpp')
@@ -40,6 +41,7 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tests/differential_tests.o \
 	$(OBJ_DIR)/tests/bench_tests.o \
 	$(OBJ_DIR)/tests/order_index_tests.o \
+	$(OBJ_DIR)/tests/market_data_tests.o \
 	$(OBJ_DIR)/tests/allocation_tests.o \
 	$(OBJ_DIR)/fuzz/order_book_fuzzer.o \
 	$(OBJ_DIR)/fuzz/standalone_main.o
@@ -48,7 +50,7 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	cmake-build clean
 
 all: $(DEMO_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
-	$(ALLOC_TEST_BIN)
+	$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
 
 # Each object also emits a .d file listing the headers it includes, so header edits trigger rebuilds.
 $(OBJ_DIR)/%.o: %.cpp
@@ -68,6 +70,9 @@ $(TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/order_book_tests.o
 $(DIFF_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/differential_tests.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+$(MARKET_DATA_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/market_data_tests.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 $(INDEX_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/order_index_tests.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
@@ -81,8 +86,10 @@ $(BENCH_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/bench_tests.o $(OBJ_DIR)/bench
 $(FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/order_book_fuzzer.o $(OBJ_DIR)/fuzz/standalone_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
-test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) $(ALLOC_TEST_BIN)
+test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) $(ALLOC_TEST_BIN) \
+		$(MARKET_DATA_TEST_BIN)
 	./$(TEST_BIN)
+	./$(MARKET_DATA_TEST_BIN)
 	./$(INDEX_TEST_BIN)
 	./$(ALLOC_TEST_BIN)
 	./$(BENCH_TEST_BIN)

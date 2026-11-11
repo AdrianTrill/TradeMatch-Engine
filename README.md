@@ -34,6 +34,8 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Cancel by order ID
 - Replace by order ID, keeping time priority when only the quantity goes down
 - Resting-order lookup by order ID
+- Multiple instruments through `MatchingEngine`, with one book per symbol
+- Market data: L2 depth updates, top of book, trade tape, OHLCV candles, VWAP, and a gap-free sequenced feed
 - Machine-readable reject reasons for every rejected request
 - Zero heap allocations on the request path once capacity is reserved
 - Deterministic benchmark/demo scenarios
@@ -73,6 +75,39 @@ auto add = book.submit({1, tradematch::Side::Buy, tradematch::OrderType::Limit, 
 auto replace = book.replace({1, tradematch::Side::Buy, tradematch::OrderType::Limit, 80, 10075});
 auto cancel = book.cancel(1);
 auto snapshot = book.snapshot();
+```
+
+### Multiple instruments and market data
+
+`MatchingEngine` owns one `OrderBook` per symbol and routes requests by `SymbolId`. Requests for unknown symbols are rejected with `UnknownSymbol`. Attaching a `MarketDataListener` turns on market data for every book: after each request, a book reports the trades it executed, then one `LevelUpdate` per price level it changed, carrying that level's final displayed quantity and order count (0 means the level is gone). Because every changed level is reported with its final state, a consumer can keep an exact copy of the book's depth from the updates alone. With no listener attached, books skip the bookkeeping entirely.
+
+`MarketDataFeed` is a ready-made listener that maintains, per symbol:
+
+- a `DepthBook` replica (L2 depth) and top of book
+- a tape of recent trades, the last price, traded volume, and VWAP
+- OHLCV `Candle`s over a configurable interval, timestamped by the caller's clock (real or simulated)
+- optionally, a log of `FeedMessage`s with gap-free sequence numbers, as a downstream feed handler would receive them
+
+```cpp
+tradematch::MatchingEngine engine;
+tradematch::MarketDataFeed feed;
+engine.set_listener(&feed);
+
+const auto acme = engine.add_symbol("ACME");
+feed.set_time(now_ns);
+engine.submit(acme, {1, tradematch::Side::Sell, tradematch::OrderType::Limit, 100, 10050});
+
+const auto top = feed.top_of_book(acme);              // best bid/ask with sizes
+const auto depth = feed.depth(acme).levels(tradematch::Side::Sell, 5);
+const auto& bars = feed.candles(acme).candles();      // OHLCV
+```
+
+```text
+requests ──► MatchingEngine ──► OrderBook per symbol ──► BookListener ──► MarketDataFeed
+                                 (zero-allocation core)   trades,          ├─ DepthBook (L2 replica) + top of book
+                                                          level updates    ├─ trade tape, last price, volume, VWAP
+                                                                           ├─ OHLCV candles
+                                                                           └─ sequenced FeedMessage log
 ```
 
 ## Matching Rules
@@ -154,12 +189,18 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── CMakeLists.txt
 ├── Makefile
 ├── include/tradematch/
+│   ├── book_listener.hpp
 │   ├── detail/
+│   │   ├── config.hpp
 │   │   └── order_index.hpp
+│   ├── market_data.hpp
+│   ├── matching_engine.hpp
 │   ├── order_book.hpp
 │   └── types.hpp
 ├── src/
 │   ├── formatting.cpp
+│   ├── market_data.cpp
+│   ├── matching_engine.cpp
 │   └── order_book.cpp
 ├── bench/
 │   ├── baseline/
@@ -174,6 +215,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── allocation_tests.cpp
 │   ├── bench_tests.cpp
 │   ├── differential_tests.cpp
+│   ├── market_data_tests.cpp
 │   ├── order_book_tests.cpp
 │   ├── order_index_tests.cpp
 │   └── support/
@@ -337,6 +379,8 @@ The test suite covers deterministic scenarios that matter for correctness:
 - a book that starts with room for one order, one level, and one trade, then grows transparently through a 1,000-trade sweep
 - invariant checks after every submit, cancel, and replace
 
+The market data suite ([tests/market_data_tests.cpp](tests/market_data_tests.cpp)) runs the full random flow (stops, icebergs, self-trade prevention, amends, and expiries) through a book with a listener attached. After every one of 80,000 operations, it checks that a depth replica built only from the published updates equals the engine's own snapshot, and that the streamed trades equal the request's trades. It also covers candle aggregation and interval alignment (including negative times), top of book, VWAP, tape length, gap-free sequencing and timestamps, symbol routing and isolation, unknown symbols, cross-symbol day expiry, and attaching or detaching listeners.
+
 Two more suites target the v2 internals:
 
 - **Zero-allocation proof** ([tests/allocation_tests.cpp](tests/allocation_tests.cpp)): replaces global `operator new` to count every heap allocation, replays the benchmark's 1,000,000-operation stream after warm-up, and fails if the engine allocates even once. The v1 baseline is counted on the same stream for comparison: 1.83 million allocations, against 0 for v2.
@@ -447,4 +491,3 @@ It is also a strong stepping stone for deeper systems work: market data fan-out,
 ## Future Improvements
 
 - Snapshot serialization and replayable input streams
-- Market data feed generation from execution events

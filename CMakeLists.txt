@@ -44,6 +44,8 @@ endif()
 
 set(TRADEMATCH_ENGINE_SOURCES
     src/formatting.cpp
+    src/market_data.cpp
+    src/matching_engine.cpp
     src/order_book.cpp
 )
 
@@ -67,6 +69,11 @@ if(BUILD_TESTING)
     add_executable(tradematch_tests tests/order_book_tests.cpp)
     target_link_libraries(tradematch_tests PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_tests COMMAND tradematch_tests)
+
+    add_executable(tradematch_market_data_tests tests/market_data_tests.cpp)
+    target_include_directories(tradematch_market_data_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(tradematch_market_data_tests PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_market_data_tests COMMAND tradematch_market_data_tests)
 
     add_executable(tradematch_order_index_tests tests/order_index_tests.cpp)
     target_link_libraries(tradematch_order_index_tests PRIVATE tradematch_engine tradematch_project_options)
