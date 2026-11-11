@@ -28,6 +28,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Time in force: GTC, DAY (with end-of-day expiry), IOC, and FOK
 - Post-only orders that are rejected rather than take liquidity
 - Self-trade prevention: cancel newest, cancel oldest, or cancel both
+- Opening and closing call auctions with an indicative price and a single-price uncross
 - Partial fills
 - Price-time priority
 - Trade execution reporting
@@ -49,6 +50,7 @@ Core public API:
 - `replace(OrderRequest)` modifies an active order. At the same price with the same or a smaller quantity, it amends in place and keeps time priority (`priority_kept`). Otherwise it cancels and resubmits under the same ID. The replacement must keep the side and the limit type, and use a time in force that can rest. Its quantity is the new open quantity.
 - `expire_day_orders()` runs end-of-day processing: it cancels every resting or pending DAY order and returns their IDs.
 - `has_stop_order(OrderId)`, `stop_order_count()`, and `last_trade_price()` expose the stop book and its trigger reference.
+- `begin_auction()`, `indicative_auction()`, and `uncross()` run a call auction. `phase()` reports whether the book is trading continuously or collecting orders.
 
 `OrderRequest` grows with optional fields, all defaulted, so `{id, side, type, quantity, price}` still works: `time_in_force`, `post_only`, `stop_price`, `display_quantity` (iceberg tranche), `owner`, and `self_trade_prevention`.
 - `get_order(OrderId)` returns the current resting state for an active order.
@@ -125,6 +127,7 @@ The engine follows standard price-time priority:
 - DAY orders behave like GTC until `expire_day_orders()` runs.
 - **Stops**: a buy stop triggers when the last trade price rises to its stop price, and a sell stop when it falls to it. A stop becomes a market order (`Stop`) or a limit order (`StopLimit`). Stops wait in a separate stop book and never appear in depth. A stop whose trigger is already met on arrival activates immediately. Triggered stops activate one at a time within the request that caused the trade. Each activation can trade, move the price, and trigger more stops, until nothing more triggers. On each side, the stop closest to the market goes first, then the earliest arrival. If both sides trigger at once, which can only happen on a book's first trade, the earlier arrival goes first. The request's `trades` include every cascaded trade.
 - **Icebergs**: an order with `display_quantity` shows one tranche at a time. Depth and `visible_quantity` report only the tranche. When a tranche is consumed, the next one is displayed and joins the back of the queue with a new sequence number, so hidden quantity never jumps ahead of displayed orders. An aggressor can sweep through refreshed tranches at the same price in one request. Hidden quantity counts toward FOK.
+- **Call auctions**: `begin_auction()` switches the book to a call phase, as exchanges do for the open and the close. Limit orders rest without matching, so the book may cross. Market orders queue for the uncross. IOC, FOK, and post-only orders are rejected with `NotAllowedInAuction`. `indicative_auction()` publishes the price, volume, and imbalance an uncross would produce. `uncross()` picks a single price using the standard exchange rules, applied in order: (1) maximize executed volume, (2) minimize the leftover surplus, (3) follow market pressure, taking the highest candidate if every candidate has excess demand and the lowest if every one has excess supply, then (4) take the candidate closest to the last trade price, preferring the lower price on a tie. It then pairs buyers and sellers at that price: queued market orders first, then by price and time, with iceberg reserves taking part. Unfilled market orders expire, continuous trading resumes, and any stops triggered by the auction price cascade. The residual book can never stay crossed: a remaining buyer and seller that crossed would raise the executable volume at some other candidate price, contradicting rule 1. The differential test asserts this after every operation.
 - **Self-trade prevention**: when an incoming order with a non-zero `owner` reaches a resting order with the same owner, its `self_trade_prevention` setting decides. `CancelOldest` cancels the resting order and keeps matching. `CancelNewest` cancels the incoming remainder. `CancelBoth` does both. The FOK pre-check follows the same rules, so a FOK that would be stopped by its own order is killed before touching the book.
 - Replace keeps time priority when it only reduces quantity at the same price, as exchanges do, because a smaller order cannot disadvantage the orders queued behind it. A price change or a larger quantity is cancel plus resubmit, so the order moves to the back of the queue at its new price.
 - Replace may never change the side or the limit order type, or move to IOC or FOK. Rejected requests leave the resting order untouched.
@@ -376,6 +379,7 @@ The test suite covers deterministic scenarios that matter for correctness:
 - stops that wait, trigger on the last trade, trigger immediately when already through the market, cascade in price-then-time order, break first-trade ties by arrival, cancel, expire, and validate
 - icebergs that display one tranche, refresh to the back of the queue, count toward FOK, validate, and amend in place
 - every self-trade prevention mode, including FOK orders that would be stopped by their own resting order
+- call auctions: collecting crossing orders without trading, rejecting IOC, FOK, and post-only, maximum-volume pricing, market pressure and reference-price tie-breaks, market-order priority and expiry, iceberg reserves in the uncross, stops triggered by the auction price, and auctions with nothing to cross
 - a book that starts with room for one order, one level, and one trade, then grows transparently through a 1,000-trade sweep
 - invariant checks after every submit, cancel, and replace
 
@@ -397,7 +401,7 @@ Hand-written scenarios only cover the cases someone thought of. To catch the res
 - **Randomized differential test** (`tradematch_differential_tests`): runs 400,000 adversarial operations (200 seeds x 2,000) through both books. The flow uses a narrow price band so orders constantly cross, small sizes so partial fills are common, and a steady stream of invalid, duplicate, and unknown-ID requests. After every operation it compares result flags, quantities, every trade field, the full depth snapshot including FIFO order IDs, and order lookups. A failure prints the seed, the diverging operation, and a one-line reproduction command.
 - **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow and aborts on the first engine/reference mismatch. CI fuzzes it for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps the target compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
 
-The random flow covers every time-in-force and post-only combination, stop and stop-limit orders around the trading band, icebergs, and orders from a small pool of owners with random self-trade prevention modes. The reference book shares none of the engine's algorithms. For example, its FOK check simply runs the real match on a throwaway copy of the whole book, which checks the engine's single-pass FOK walk against the real matching path. Half of all replacements target an order's current price with the same or a smaller size, to exercise in-place amends, and end-of-day expiries are interleaved, with the expired ID lists compared.
+The random flow covers call auctions (opened about every 150 operations and uncrossed about 30 later), every time-in-force and post-only combination, stop and stop-limit orders around the trading band, icebergs, and orders from a small pool of owners with random self-trade prevention modes. The reference book shares none of the engine's algorithms. For example, its FOK check simply runs the real match on a throwaway copy of the whole book, which checks the engine's single-pass FOK walk against the real matching path. During call phases, the indicative auction price and volumes are compared after every operation, and the engine's two-pointer equilibrium search is checked against a full scan of the book at every candidate price. Half of all replacements target an order's current price with the same or a smaller size, to exercise in-place amends, and end-of-day expiries are interleaved, with the expired ID lists compared.
 
 The harness has been checked by mutation testing. Each injected bug was caught within the first 1,000 operations, most within a few hundred:
 
@@ -415,8 +419,9 @@ The harness has been checked by mutation testing. Each injected bug was caught w
 - cancel-oldest stopping the match
 - a buy stop that triggers only strictly above its stop price
 - an iceberg amend that shrinks the displayed part before the reserve
+- an auction that skips the minimum-surplus rule, inverts market pressure, leaves iceberg reserves out of its volume, gives market orders no priority, or accepts IOC orders during the call phase
 
-The cross-side stop ordering cannot arise in random flow except on a book's first trade, so it is pinned by a dedicated unit test.
+Two rules are too rare in random flow to rely on it: cross-side stop ordering, which can only arise on a book's first trade, and the auction's lower-price tie-break, which needs two candidates exactly equidistant from the reference price. Dedicated unit tests pin both.
 
 ```bash
 make test        # unit tests + 400k-operation differential test + fuzz smoke test

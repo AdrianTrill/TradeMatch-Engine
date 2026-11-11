@@ -24,8 +24,13 @@ public:
 
         auto reason = validation_reason(order);
         if (reason == RejectReason::None &&
-            (find(order.order_id) != orders_.end() || find_stop(order.order_id) != stops_.end())) {
+            (find(order.order_id) != orders_.end() || find_stop(order.order_id) != stops_.end() ||
+             find_auction_market(order.order_id) != nullptr)) {
             reason = RejectReason::DuplicateOrderId;
+        }
+        if (reason == RejectReason::None && phase_ == TradingPhase::Auction &&
+            (!can_rest(order.time_in_force) || order.post_only)) {
+            reason = RejectReason::NotAllowedInAuction;
         }
         if (reason == RejectReason::None && order.post_only && best_opposing_order(order) != orders_.end()) {
             reason = RejectReason::PostOnlyWouldCross;
@@ -64,6 +69,16 @@ public:
             orders_.erase(it);
             return result;
         }
+        for (auto* queue : {&auction_buys_, &auction_sells_}) {
+            const auto queued =
+                std::ranges::find_if(*queue, [&](const auto& entry) { return entry.order_id == order_id; });
+            if (queued != queue->end()) {
+                result.cancelled = true;
+                result.cancelled_quantity = queued->quantity;
+                queue->erase(queued);
+                return result;
+            }
+        }
         if (const auto stop = find_stop(order_id); stop != stops_.end()) {
             result.cancelled = true;
             result.cancelled_quantity = stop->request.quantity;
@@ -91,6 +106,9 @@ public:
         }
         if (result.reject_reason == RejectReason::None && !can_rest(replacement.time_in_force)) {
             result.reject_reason = RejectReason::InvalidTimeInForce;
+        }
+        if (result.reject_reason == RejectReason::None && phase_ == TradingPhase::Auction && replacement.post_only) {
+            result.reject_reason = RejectReason::NotAllowedInAuction;
         }
         if (result.reject_reason != RejectReason::None) {
             finish_request(result.submit_result);
@@ -142,10 +160,87 @@ public:
                 expired.push_back(stop.request.order_id);
             }
         }
+        for (const auto* queue : {&auction_buys_, &auction_sells_}) {
+            for (const auto& queued : *queue) {
+                if (queued.time_in_force == TimeInForce::Day) {
+                    expired.push_back(queued.order_id);
+                }
+            }
+        }
+        for (auto* queue : {&auction_buys_, &auction_sells_}) {
+            std::erase_if(*queue, [](const auto& queued) { return queued.time_in_force == TimeInForce::Day; });
+        }
         std::erase_if(orders_, [](const auto& order) { return order.time_in_force == TimeInForce::Day; });
         std::erase_if(stops_, [](const auto& stop) { return stop.request.time_in_force == TimeInForce::Day; });
         std::ranges::sort(expired);
         return expired;
+    }
+
+    void begin_auction() {
+        phase_ = TradingPhase::Auction;
+    }
+
+    TradingPhase phase() const {
+        return phase_;
+    }
+
+    std::size_t auction_market_order_count() const {
+        return auction_buys_.size() + auction_sells_.size();
+    }
+
+    std::optional<AuctionIndicative> indicative_auction() const {
+        if (phase_ != TradingPhase::Auction) {
+            return std::nullopt;
+        }
+        const auto chosen = equilibrium();
+        if (!chosen) {
+            return std::nullopt;
+        }
+        return AuctionIndicative{chosen->price,
+                                 chosen->matched,
+                                 chosen->buy - chosen->matched,
+                                 chosen->sell - chosen->matched};
+    }
+
+    AuctionResult uncross() {
+        begin_request();
+        expired_market_orders_.clear();
+        AuctionResult result;
+        if (phase_ == TradingPhase::Auction) {
+            if (const auto chosen = equilibrium()) {
+                Volume remaining = chosen->matched;
+                while (remaining > 0U) {
+                    const auto fill = static_cast<Quantity>(std::min<Volume>(
+                        {next_auction_quantity(Side::Buy), next_auction_quantity(Side::Sell), remaining}));
+                    Trade trade;
+                    trade.trade_id = next_trade_id_++;
+                    trade.buy_order_id = take_auction_side(Side::Buy, fill);
+                    trade.sell_order_id = take_auction_side(Side::Sell, fill);
+                    trade.price = chosen->price;
+                    trade.quantity = fill;
+                    trade.auction = true;
+                    trades_.push_back(trade);
+                    last_trade_price_ = chosen->price;
+                    remaining -= fill;
+                }
+                result.executed = true;
+                result.price = chosen->price;
+                result.matched_quantity = chosen->matched;
+            }
+            for (const auto* queue : {&auction_buys_, &auction_sells_}) {
+                for (const auto& queued : *queue) {
+                    expired_market_orders_.push_back(queued.order_id);
+                }
+            }
+            auction_buys_.clear();
+            auction_sells_.clear();
+            phase_ = TradingPhase::Continuous;
+            process_stops();
+        }
+        result.trades = trades_;
+        result.expired_market_orders = expired_market_orders_;
+        result.triggered_stops = triggered_;
+        return result;
     }
 
     std::optional<RestingOrderView> get_order(OrderId order_id) const {
@@ -223,12 +318,166 @@ private:
         OwnerId owner{};
     };
 
+    using Orders = std::vector<Resting>;
+
     struct PendingStop {
         OrderRequest request;
         SequenceNumber sequence{};
     };
 
-    using Orders = std::vector<Resting>;
+    struct AuctionMarket {
+        OrderId order_id{};
+        Quantity quantity{};
+        TimeInForce time_in_force{TimeInForce::GoodTillCancel};
+    };
+
+    struct Candidate {
+        Price price{};
+        Volume buy{};
+        Volume sell{};
+        Volume matched{};
+    };
+
+    const AuctionMarket* find_auction_market(OrderId order_id) const {
+        for (const auto* queue : {&auction_buys_, &auction_sells_}) {
+            for (const auto& queued : *queue) {
+                if (queued.order_id == order_id) {
+                    return &queued;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // Auction price selection written out directly: volumes at each candidate come from a full scan of the book.
+    std::optional<Candidate> equilibrium() const {
+        std::vector<Price> prices;
+        for (const auto& order : orders_) {
+            if (std::ranges::find(prices, order.price) == prices.end()) {
+                prices.push_back(order.price);
+            }
+        }
+        if (prices.empty() && last_trade_price_) {
+            prices.push_back(*last_trade_price_);
+        }
+        std::ranges::sort(prices);
+
+        std::vector<Candidate> candidates;
+        for (const Price price : prices) {
+            Candidate candidate{price, 0U, 0U, 0U};
+            for (const auto& queued : auction_buys_) {
+                candidate.buy += queued.quantity;
+            }
+            for (const auto& queued : auction_sells_) {
+                candidate.sell += queued.quantity;
+            }
+            for (const auto& order : orders_) {
+                if (order.side == Side::Buy && order.price >= price) {
+                    candidate.buy += order.visible + order.hidden;
+                }
+                if (order.side == Side::Sell && order.price <= price) {
+                    candidate.sell += order.visible + order.hidden;
+                }
+            }
+            candidate.matched = std::min(candidate.buy, candidate.sell);
+            candidates.push_back(candidate);
+        }
+
+        Volume most = 0;
+        for (const auto& candidate : candidates) {
+            most = std::max(most, candidate.matched);
+        }
+        if (most == 0U) {
+            return std::nullopt;
+        }
+        std::erase_if(candidates, [&](const Candidate& candidate) { return candidate.matched != most; });
+
+        const auto surplus = [](const Candidate& candidate) {
+            return std::max(candidate.buy, candidate.sell) - candidate.matched;
+        };
+        Volume least = surplus(candidates.front());
+        for (const auto& candidate : candidates) {
+            least = std::min(least, surplus(candidate));
+        }
+        std::erase_if(candidates, [&](const Candidate& candidate) { return surplus(candidate) != least; });
+
+        bool buy_pressure = true;
+        bool sell_pressure = true;
+        for (const auto& candidate : candidates) {
+            buy_pressure = buy_pressure && candidate.buy > candidate.sell;
+            sell_pressure = sell_pressure && candidate.sell > candidate.buy;
+        }
+        if (buy_pressure) {
+            return candidates.back();
+        }
+        if (sell_pressure) {
+            return candidates.front();
+        }
+
+        const Price reference = last_trade_price_.value_or((candidates.front().price + candidates.back().price) / 2);
+        Candidate best = candidates.front();
+        for (const auto& candidate : candidates) {
+            const Price distance =
+                candidate.price > reference ? candidate.price - reference : reference - candidate.price;
+            const Price best_distance = best.price > reference ? best.price - reference : reference - best.price;
+            if (distance < best_distance) {
+                best = candidate;
+            }
+        }
+        return best;
+    }
+
+    // Open quantity of the next order in auction priority on one side: queued market orders, then the best price,
+    // then the earliest sequence.
+    Quantity next_auction_quantity(Side side) {
+        auto& queue = side == Side::Buy ? auction_buys_ : auction_sells_;
+        if (!queue.empty()) {
+            return queue.front().quantity;
+        }
+        return best_resting(side)->visible;
+    }
+
+    // Takes `fill` from the next order in auction priority on one side and returns its ID.
+    OrderId take_auction_side(Side side, Quantity fill) {
+        auto& queue = side == Side::Buy ? auction_buys_ : auction_sells_;
+        if (!queue.empty()) {
+            const OrderId order_id = queue.front().order_id;
+            queue.front().quantity -= fill;
+            if (queue.front().quantity == 0U) {
+                queue.erase(queue.begin());
+            }
+            return order_id;
+        }
+        const auto best = best_resting(side);
+        const OrderId order_id = best->order_id;
+        best->visible -= fill;
+        if (best->visible == 0U) {
+            if (best->hidden > 0U) {
+                best->visible = std::min(best->display, best->hidden);
+                best->hidden -= best->visible;
+                best->sequence = next_sequence_++;
+            } else {
+                orders_.erase(best);
+            }
+        }
+        return order_id;
+    }
+
+    Orders::iterator best_resting(Side side) {
+        auto best = orders_.end();
+        for (auto it = orders_.begin(); it != orders_.end(); ++it) {
+            if (it->side != side) {
+                continue;
+            }
+            const bool better = best == orders_.end() ||
+                                (side == Side::Buy ? it->price > best->price : it->price < best->price) ||
+                                (it->price == best->price && it->sequence < best->sequence);
+            if (better) {
+                best = it;
+            }
+        }
+        return best;
+    }
 
     static bool can_rest(TimeInForce time_in_force) {
         return time_in_force == TimeInForce::GoodTillCancel || time_in_force == TimeInForce::Day;
@@ -346,6 +595,18 @@ private:
         result.accepted = true;
         const SequenceNumber sequence = next_sequence_++;
 
+        if (phase_ == TradingPhase::Auction) {
+            if (order.type == OrderType::Market) {
+                (order.side == Side::Buy ? auction_buys_ : auction_sells_)
+                    .push_back(AuctionMarket{order.order_id, order.quantity, order.time_in_force});
+                result.queued_for_auction = true;
+                return;
+            }
+            rest(order, order.quantity, sequence);
+            result.rested = true;
+            return;
+        }
+
         if (order.time_in_force == TimeInForce::FillOrKill && fillable_quantity(order) < order.quantity) {
             result.expired = true;
             return;
@@ -368,6 +629,11 @@ private:
             return;
         }
 
+        rest(order, remaining, sequence);
+        result.rested = true;
+    }
+
+    void rest(const OrderRequest& order, Quantity remaining, SequenceNumber sequence) {
         const bool iceberg = order.display_quantity > 0U && order.display_quantity < remaining;
         const Quantity visible = iceberg ? order.display_quantity : remaining;
         orders_.push_back(Resting{order.order_id,
@@ -379,7 +645,6 @@ private:
                                   sequence,
                                   order.time_in_force,
                                   order.owner});
-        result.rested = true;
     }
 
     void activate(const OrderRequest& stop, SubmitResult& result) {
@@ -482,6 +747,10 @@ private:
 
     Orders orders_;
     std::vector<PendingStop> stops_;
+    std::vector<AuctionMarket> auction_buys_;
+    std::vector<AuctionMarket> auction_sells_;
+    std::vector<OrderId> expired_market_orders_;
+    TradingPhase phase_{TradingPhase::Continuous};
     std::vector<Trade> trades_;
     std::vector<OrderId> triggered_;
     std::vector<OrderId> self_trade_cancels_;

@@ -61,7 +61,13 @@ enum class RejectReason : std::uint8_t {
     PostOnlyWouldCross,      // a post-only order may not take liquidity
     InvalidStopPrice,        // stop orders need a positive stop price; other orders must leave it at 0
     InvalidDisplayQuantity,  // icebergs need a limit price, a resting time in force, and display <= quantity
-    UnknownSymbol            // a matching engine request named a symbol that does not exist
+    UnknownSymbol,           // a matching engine request named a symbol that does not exist
+    NotAllowedInAuction      // IOC, FOK, and post-only orders cannot join a call auction
+};
+
+enum class TradingPhase : std::uint8_t {
+    Continuous,  // orders match on arrival
+    Auction      // orders accumulate without matching until uncross()
 };
 
 struct OrderRequest {
@@ -84,7 +90,8 @@ struct Trade {
     OrderId sell_order_id{};
     Price price{};
     Quantity quantity{};
-    Side aggressor_side{Side::Buy};
+    Side aggressor_side{Side::Buy};  // meaningless for auction trades, which have no aggressor
+    bool auction{false};             // executed by an auction uncross at the single auction price
 };
 
 // Results are plain values that never own heap memory. `trades` is a view into a buffer owned by the order book and
@@ -96,6 +103,7 @@ struct SubmitResult {
     bool rested{false};
     bool expired{false};
     bool pending_trigger{false};       // a stop order waiting in the stop book
+    bool queued_for_auction{false};    // a market order waiting for the auction uncross
     bool self_trade_prevented{false};  // self-trade prevention cancelled the incoming order's remainder
     RejectReason reject_reason{RejectReason::None};
     Quantity filled_quantity{};
@@ -122,6 +130,26 @@ struct ReplaceResult {
     Quantity previous_remaining_quantity{};
     SubmitResult submit_result;
     std::string_view message;
+};
+
+// What an auction uncross would do at this moment. Published during the call phase so participants can see the
+// indicative price and the imbalance they could still fill.
+struct AuctionIndicative {
+    Price price{};
+    Volume matched_quantity{};
+    Volume buy_surplus{};   // buy quantity at or above the price that would stay unfilled
+    Volume sell_surplus{};  // sell quantity at or below the price that would stay unfilled
+
+    bool operator==(const AuctionIndicative&) const = default;
+};
+
+struct AuctionResult {
+    bool executed{false};  // false when nothing crossed; the book still returns to continuous trading
+    Price price{};
+    Volume matched_quantity{};
+    std::span<const Trade> trades;                   // the auction trades, then any trades from triggered stops
+    std::span<const OrderId> expired_market_orders;  // market orders the uncross could not fill
+    std::span<const OrderId> triggered_stops;
 };
 
 struct RestingOrderView {

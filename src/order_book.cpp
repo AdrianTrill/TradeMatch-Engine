@@ -99,7 +99,8 @@ TRADEMATCH_HOT_INLINE OrderBook::Rejection OrderBook::validate(const OrderReques
         }
     }
     if (!replacing &&
-        (index_.contains(order.order_id) || (stop_index_.size() != 0U && stop_index_.contains(order.order_id)))) {
+        (index_.contains(order.order_id) || (stop_index_.size() != 0U && stop_index_.contains(order.order_id)) ||
+         (auction_market_order_count() != 0U && has_auction_market_order(order.order_id)))) {
         return {RejectReason::DuplicateOrderId, "Order ID is already active in the book."};
     }
     return {};
@@ -179,6 +180,12 @@ SubmitResult OrderBook::submit(const OrderRequest& order) {
         finish_request(result);
         return result;
     }
+    if (phase_ == TradingPhase::Auction && (!can_rest(order.time_in_force) || order.post_only)) {
+        result.reject_reason = RejectReason::NotAllowedInAuction;
+        result.message = "IOC, FOK, and post-only orders cannot join a call auction.";
+        finish_request(result);
+        return result;
+    }
     if (order.post_only && would_cross(order)) {
         result.reject_reason = RejectReason::PostOnlyWouldCross;
         result.message = "Post-only order would take liquidity and was rejected.";
@@ -211,6 +218,21 @@ SubmitResult OrderBook::submit(const OrderRequest& order) {
 void OrderBook::execute(const OrderRequest& order, SubmitResult& result) {
     const SequenceNumber sequence = next_sequence_++;
     result.accepted = true;
+
+    // During a call auction nothing matches: limit orders rest even when they cross, market orders wait for uncross.
+    if (phase_ == TradingPhase::Auction) {
+        if (order.type == OrderType::Market) {
+            auto& queue = order.side == Side::Buy ? auction_buys_ : auction_sells_;
+            queue.push_back(AuctionMarketOrder{order.order_id, order.quantity, order.time_in_force});
+            result.queued_for_auction = true;
+            result.message = "Market order queued for the auction uncross.";
+            return;
+        }
+        rest(order, order.quantity, sequence);
+        result.rested = true;
+        result.message = "Order added to the auction book.";
+        return;
+    }
 
     if (order.time_in_force == TimeInForce::FillOrKill && available_liquidity(order) < order.quantity) {
         result.expired = true;
@@ -276,6 +298,13 @@ CancelResult OrderBook::cancel(OrderId order_id) {
         return result;
     }
 
+    if (Quantity queued = 0; remove_auction_market_order(order_id, queued)) {
+        result.cancelled = true;
+        result.cancelled_quantity = queued;
+        result.message = "Auction market order cancelled.";
+        return result;
+    }
+
     const Slot stop_slot = stop_index_.find(order_id);
     if (stop_slot != detail::OrderIndex::kMissing) {
         result.cancelled = true;
@@ -322,6 +351,9 @@ ReplaceResult OrderBook::replace(const OrderRequest& replacement) {
     if (!can_rest(replacement.time_in_force)) {
         return reject(RejectReason::InvalidTimeInForce,
                       "A replacement must keep a time in force that can rest (GTC or DAY).");
+    }
+    if (phase_ == TradingPhase::Auction && replacement.post_only) {
+        return reject(RejectReason::NotAllowedInAuction, "Post-only orders cannot join a call auction.");
     }
 
     const Quantity open_quantity = existing.remaining + existing.hidden;
@@ -398,6 +430,14 @@ std::vector<OrderId> OrderBook::expire_day_orders() {
 
     std::vector<OrderId> expired;
     expired.reserve(expiring_nodes.size() + expiring_stops.size());
+    for (auto* queue : {&auction_buys_, &auction_sells_}) {
+        for (const auto& queued : *queue) {
+            if (queued.time_in_force == TimeInForce::Day) {
+                expired.push_back(queued.order_id);
+            }
+        }
+        std::erase_if(*queue, [](const auto& queued) { return queued.time_in_force == TimeInForce::Day; });
+    }
     for (const Slot node_slot : expiring_nodes) {
         expired.push_back(nodes_[node_slot].order_id);
         remove_resting(node_slot);
@@ -411,6 +451,239 @@ std::vector<OrderId> OrderBook::expire_day_orders() {
         publish({});
     }
     return expired;
+}
+
+AuctionResult OrderBook::uncross() {
+    begin_request();
+    expired_market_orders_.clear();
+
+    AuctionResult result;
+    if (phase_ == TradingPhase::Auction) {
+        if (const auto equilibrium = find_equilibrium()) {
+            execute_auction(equilibrium->price, equilibrium->matched);
+            result.executed = true;
+            result.price = equilibrium->price;
+            result.matched_quantity = equilibrium->matched;
+        }
+
+        // Market orders that the uncross could not fill expire rather than chase the book in continuous trading.
+        for (const auto* queue : {&auction_buys_, &auction_sells_}) {
+            for (const auto& queued : *queue) {
+                expired_market_orders_.push_back(queued.order_id);
+            }
+        }
+        auction_buys_.clear();
+        auction_sells_.clear();
+        phase_ = TradingPhase::Continuous;
+
+        if (has_pending_stops()) {
+            process_triggered_stops();
+        }
+    }
+
+    result.trades = trades_;
+    result.expired_market_orders = expired_market_orders_;
+    result.triggered_stops = triggered_;
+    if (listener_ != nullptr) {
+        publish(trades_);
+    }
+    return result;
+}
+
+std::optional<AuctionIndicative> OrderBook::indicative_auction() const {
+    if (phase_ != TradingPhase::Auction) {
+        return std::nullopt;
+    }
+    const auto equilibrium = find_equilibrium();
+    if (!equilibrium) {
+        return std::nullopt;
+    }
+    return AuctionIndicative{equilibrium->price,
+                             equilibrium->matched,
+                             equilibrium->buy_volume - equilibrium->matched,
+                             equilibrium->sell_volume - equilibrium->matched};
+}
+
+// Chooses the auction price with the standard exchange rules, applied in order:
+//   1. maximize the executable quantity, min(buy volume at or above p, sell volume at or below p);
+//   2. minimize the surplus left on the heavier side;
+//   3. follow market pressure: the highest candidate if every remaining one has a buy surplus, the lowest if every
+//      remaining one has a sell surplus;
+//   4. otherwise take the candidate closest to the reference price (the last trade, or the middle of the remaining
+//      candidates if there was none), preferring the lower price on a tie.
+// Candidates are the prices of resting limit orders. When only market orders cross, the last trade price is used.
+TRADEMATCH_COLD std::optional<OrderBook::Equilibrium> OrderBook::find_equilibrium() const {
+    Volume market_buys = 0;
+    for (const auto& queued : auction_buys_) {
+        market_buys += queued.quantity;
+    }
+    Volume market_sells = 0;
+    for (const auto& queued : auction_sells_) {
+        market_sells += queued.quantity;
+    }
+
+    std::vector<Price> prices;
+    prices.reserve(bids_.size() + asks_.size());
+    for (const LadderEntry& entry : bids_) {
+        prices.push_back(entry.price);
+    }
+    for (const LadderEntry& entry : asks_) {
+        prices.push_back(entry.price);
+    }
+    std::ranges::sort(prices);
+    const auto duplicates = std::ranges::unique(prices);
+    prices.erase(duplicates.begin(), duplicates.end());
+    if (prices.empty() && last_trade_price_) {
+        prices.push_back(*last_trade_price_);
+    }
+
+    // Cumulative volumes with two pointers: bids from the highest price down, asks from the lowest price up.
+    std::vector<Equilibrium> candidates(prices.size());
+    Volume bid_volume = market_buys;
+    auto bid = bids_.rbegin();
+    for (std::size_t index = prices.size(); index-- > 0;) {
+        for (; bid != bids_.rend() && bid->price >= prices[index]; ++bid) {
+            const PriceLevel& level = levels_[bid->level];
+            bid_volume += level.total_quantity + level.hidden_quantity;
+        }
+        candidates[index].price = prices[index];
+        candidates[index].buy_volume = bid_volume;
+    }
+    Volume ask_volume = market_sells;
+    auto ask = asks_.rbegin();
+    for (std::size_t index = 0; index < prices.size(); ++index) {
+        for (; ask != asks_.rend() && ask->price <= prices[index]; ++ask) {
+            const PriceLevel& level = levels_[ask->level];
+            ask_volume += level.total_quantity + level.hidden_quantity;
+        }
+        candidates[index].sell_volume = ask_volume;
+        candidates[index].matched = std::min(candidates[index].buy_volume, ask_volume);
+    }
+
+    const auto surplus = [](const Equilibrium& candidate) {
+        return std::max(candidate.buy_volume, candidate.sell_volume) - candidate.matched;
+    };
+    Volume best_matched = 0;
+    for (const auto& candidate : candidates) {
+        best_matched = std::max(best_matched, candidate.matched);
+    }
+    if (best_matched == 0U) {
+        return std::nullopt;
+    }
+    std::erase_if(candidates, [&](const Equilibrium& candidate) { return candidate.matched != best_matched; });
+    Volume least_surplus = surplus(candidates.front());
+    for (const auto& candidate : candidates) {
+        least_surplus = std::min(least_surplus, surplus(candidate));
+    }
+    std::erase_if(candidates, [&](const Equilibrium& candidate) { return surplus(candidate) != least_surplus; });
+
+    const bool all_buy_pressure = std::ranges::all_of(candidates, [](const Equilibrium& candidate) {
+        return candidate.buy_volume > candidate.sell_volume;
+    });
+    const bool all_sell_pressure = std::ranges::all_of(candidates, [](const Equilibrium& candidate) {
+        return candidate.sell_volume > candidate.buy_volume;
+    });
+    if (all_buy_pressure) {
+        return candidates.back();
+    }
+    if (all_sell_pressure) {
+        return candidates.front();
+    }
+
+    const Price reference = last_trade_price_.value_or((candidates.front().price + candidates.back().price) / 2);
+    const auto distance = [reference](Price price) {
+        return price > reference ? price - reference : reference - price;
+    };
+    const Equilibrium* closest = &candidates.front();
+    for (const auto& candidate : candidates) {
+        if (distance(candidate.price) < distance(closest->price)) {
+            closest = &candidate;
+        }
+    }
+    return *closest;
+}
+
+// Pairs buyers and sellers in priority order at the single auction price until `quantity` has traded: queued market
+// orders first, then resting orders by price and then time. Iceberg reserves refresh as they would in continuous
+// matching. Auction trades have no aggressor.
+TRADEMATCH_COLD void OrderBook::execute_auction(Price price, Volume quantity) {
+    // Consumes `fill` from the order at the head of the best level of one side, refreshing or removing it as needed.
+    const auto consume_resting = [this](Ladder& side_ladder, Quantity fill) {
+        const Slot level_slot = side_ladder.back().level;
+        PriceLevel& level = levels_[level_slot];
+        const Slot node_slot = level.head;
+        nodes_[node_slot].remaining -= fill;
+        level.total_quantity -= fill;
+        touch_level(level.side, level.price);
+        if (nodes_[node_slot].remaining == 0U) {
+            if (nodes_[node_slot].hidden > 0U) {
+                refresh_iceberg(node_slot, level);
+            } else {
+                detach_node(node_slot, level);
+            }
+        }
+        if (level.head == kNone) {
+            side_ladder.pop_back();
+            release_level(level_slot);
+        }
+    };
+
+    std::size_t next_market_buy = 0;
+    std::size_t next_market_sell = 0;
+    while (quantity > 0U) {
+        const bool market_buy = next_market_buy < auction_buys_.size();
+        const bool market_sell = next_market_sell < auction_sells_.size();
+        const OrderNode* bid = market_buy ? nullptr : &nodes_[levels_[bids_.back().level].head];
+        const OrderNode* ask = market_sell ? nullptr : &nodes_[levels_[asks_.back().level].head];
+
+        const Quantity buy_open = market_buy ? auction_buys_[next_market_buy].quantity : bid->remaining;
+        const Quantity sell_open = market_sell ? auction_sells_[next_market_sell].quantity : ask->remaining;
+        const OrderId buyer = market_buy ? auction_buys_[next_market_buy].order_id : bid->order_id;
+        const OrderId seller = market_sell ? auction_sells_[next_market_sell].order_id : ask->order_id;
+
+        const auto fill = static_cast<Quantity>(std::min<Volume>({buy_open, sell_open, quantity}));
+        trades_.push_back(Trade{next_trade_id_++, buyer, seller, price, fill, Side::Buy, true});
+        last_trade_price_ = price;
+        quantity -= fill;
+
+        if (market_buy) {
+            auction_buys_[next_market_buy].quantity -= fill;
+            next_market_buy += auction_buys_[next_market_buy].quantity == 0U ? 1U : 0U;
+        } else {
+            consume_resting(bids_, fill);
+        }
+        if (market_sell) {
+            auction_sells_[next_market_sell].quantity -= fill;
+            next_market_sell += auction_sells_[next_market_sell].quantity == 0U ? 1U : 0U;
+        } else {
+            consume_resting(asks_, fill);
+        }
+    }
+
+    auction_buys_.erase(auction_buys_.begin(), auction_buys_.begin() + static_cast<std::ptrdiff_t>(next_market_buy));
+    auction_sells_.erase(auction_sells_.begin(),
+                         auction_sells_.begin() + static_cast<std::ptrdiff_t>(next_market_sell));
+}
+
+bool OrderBook::has_auction_market_order(OrderId order_id) const noexcept {
+    const auto matches = [order_id](const AuctionMarketOrder& queued) {
+        return queued.order_id == order_id;
+    };
+    return std::ranges::any_of(auction_buys_, matches) || std::ranges::any_of(auction_sells_, matches);
+}
+
+bool OrderBook::remove_auction_market_order(OrderId order_id, Quantity& quantity) {
+    for (auto* queue : {&auction_buys_, &auction_sells_}) {
+        const auto it = std::ranges::find_if(*queue, [order_id](const AuctionMarketOrder& queued) {
+            return queued.order_id == order_id;
+        });
+        if (it != queue->end()) {
+            quantity = it->quantity;
+            queue->erase(it);
+            return true;
+        }
+    }
+    return false;
 }
 
 bool OrderBook::has_order(OrderId order_id) const noexcept {

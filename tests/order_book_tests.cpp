@@ -112,9 +112,9 @@ void expect_book_invariants(const tradematch::OrderBook& book) {
     check_side(snapshot.bids, tradematch::Side::Buy, true);
     check_side(snapshot.asks, tradematch::Side::Sell, false);
 
-    if (!snapshot.bids.empty() && !snapshot.asks.empty()) {
+    if (book.phase() == tradematch::TradingPhase::Continuous && !snapshot.bids.empty() && !snapshot.asks.empty()) {
         expect(snapshot.bids.front().price < snapshot.asks.front().price,
-               "The visible book should never remain crossed after matching.");
+               "Outside an auction the visible book should never remain crossed.");
     }
 
     expect_equal(visible_order_count, book.order_count(), "Visible orders should match the indexed order count.");
@@ -920,6 +920,159 @@ void test_fill_or_kill_respects_self_trade_prevention() {
     expect(filled.self_trade_cancels.size() == 1U && !book.has_order(1), "Its own resting order is cancelled.");
 }
 
+void test_auction_collects_orders_without_matching() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    book.begin_auction();
+    expect(book.phase() == tradematch::TradingPhase::Auction, "The book should be in the call phase.");
+
+    const auto bid = submit_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10100});
+    const auto ask = submit_checked(book, {2, Side::Sell, OrderType::Limit, 10, 9900});
+    expect(bid.rested && ask.rested && ask.trades.empty(), "Crossing orders rest without trading.");
+    expect(book.best_bid().value_or(0) > book.best_ask().value_or(0), "The call book may be crossed.");
+
+    const auto market = submit_checked(book, {3, Side::Buy, OrderType::Market, 5, 0});
+    expect(market.queued_for_auction && !market.rested && book.auction_market_order_count() == 1U,
+           "Market orders queue for the uncross.");
+    const auto indicative = expect_value(book.indicative_auction(), "Crossing interest gives an indicative price.");
+    expect(indicative.matched_quantity == 10U && indicative.buy_surplus == 5U, "Indicative volume and surplus.");
+}
+
+void test_auction_rejects_immediate_and_post_only_orders() {
+    using tradematch::OrderType;
+    using tradematch::RejectReason;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10000});
+    book.begin_auction();
+    expect(book.submit({2, Side::Buy, OrderType::Limit, 10, 10000, TimeInForce::ImmediateOrCancel}).reject_reason ==
+               RejectReason::NotAllowedInAuction,
+           "IOC orders cannot join a call auction.");
+    expect(book.submit({2, Side::Buy, OrderType::Limit, 10, 10000, TimeInForce::FillOrKill}).reject_reason ==
+               RejectReason::NotAllowedInAuction,
+           "FOK orders cannot join a call auction.");
+    expect(book.submit({2, Side::Buy, OrderType::Limit, 10, 9900, TimeInForce::GoodTillCancel, true}).reject_reason ==
+               RejectReason::NotAllowedInAuction,
+           "Post-only orders cannot join a call auction.");
+    expect(book.replace({1, Side::Buy, OrderType::Limit, 10, 9900, TimeInForce::GoodTillCancel, true}).reject_reason ==
+               RejectReason::NotAllowedInAuction,
+           "Post-only replacements cannot join a call auction.");
+}
+
+void test_uncross_maximizes_executed_volume() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    book.begin_auction();
+    // Cumulative demand and supply: at 100 buy 30 / sell 10, at 101 buy 20 / sell 25, at 102 buy 10 / sell 40.
+    submit_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10200});
+    submit_checked(book, {2, Side::Buy, OrderType::Limit, 10, 10100});
+    submit_checked(book, {3, Side::Buy, OrderType::Limit, 10, 10000});
+    submit_checked(book, {4, Side::Sell, OrderType::Limit, 10, 10000});
+    submit_checked(book, {5, Side::Sell, OrderType::Limit, 15, 10100});
+    submit_checked(book, {6, Side::Sell, OrderType::Limit, 15, 10200});
+
+    const auto result = book.uncross();
+    expect_book_invariants(book);
+    expect(result.executed && result.price == 10100 && result.matched_quantity == 20U,
+           "101.00 executes the most volume (20).");
+    for (const auto& trade : result.trades) {
+        expect(trade.auction && trade.price == 10100, "Every auction trade prints at the single auction price.");
+    }
+    expect(book.phase() == tradematch::TradingPhase::Continuous, "The uncross returns to continuous trading.");
+    expect(book.best_bid().value_or(0) < book.best_ask().value_or(0), "The residual book is not crossed.");
+    expect_equal(book.last_trade_price().value_or(0), tradematch::Price{10100}, "The auction sets the last price.");
+}
+
+void test_uncross_follows_market_pressure_and_reference_price() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    {
+        // Equal volume and surplus at 100 and 101, both with excess demand: market pressure picks the higher price.
+        tradematch::OrderBook book;
+        book.begin_auction();
+        submit_checked(book, {1, Side::Buy, OrderType::Limit, 20, 10100});
+        submit_checked(book, {2, Side::Sell, OrderType::Limit, 10, 10000});
+        submit_checked(book, {3, Side::Buy, OrderType::Market, 5, 0});
+        expect(book.uncross().price == 10100, "Excess demand at every candidate pushes the price up.");
+    }
+    {
+        // A perfectly balanced cross at 99 and 101: the price closest to the last trade (100) wins, lower on a tie.
+        tradematch::OrderBook book;
+        submit_checked(book, {1, Side::Sell, OrderType::Limit, 1, 10000});
+        submit_checked(book, {2, Side::Buy, OrderType::Limit, 1, 10000});
+        book.begin_auction();
+        submit_checked(book, {3, Side::Buy, OrderType::Limit, 10, 10100});
+        submit_checked(book, {4, Side::Sell, OrderType::Limit, 10, 9900});
+        expect(book.uncross().price == 9900, "Equidistant from the reference price, the lower candidate wins.");
+    }
+}
+
+void test_auction_market_orders_fill_first_and_expire() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    book.begin_auction();
+    submit_checked(book, {1, Side::Buy, OrderType::Limit, 10, 10100});
+    submit_checked(book, {2, Side::Buy, OrderType::Market, 10, 0});
+    submit_checked(book, {3, Side::Sell, OrderType::Limit, 15, 10000});
+    submit_checked(book, {4, Side::Sell, OrderType::Market, 100, 0});
+
+    const auto result = book.uncross();
+    expect(result.executed, "Market orders on both sides cross.");
+    expect(result.trades.front().buy_order_id == 2U && result.trades.front().sell_order_id == 4U,
+           "Market orders have the highest auction priority.");
+    expect(std::ranges::equal(result.expired_market_orders, std::vector<tradematch::OrderId>{4}),
+           "The unfilled market sell expires instead of resting.");
+    expect(book.auction_market_order_count() == 0U, "No market order survives the uncross.");
+}
+
+void test_auction_counts_iceberg_reserves() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    book.begin_auction();
+    submit_checked(book, iceberg(1, Side::Sell, 50, 10000, 10));
+    submit_checked(book, {2, Side::Buy, OrderType::Limit, 40, 10000});
+
+    const auto indicative = expect_value(book.indicative_auction(), "The cross should be visible.");
+    expect(indicative.matched_quantity == 40U, "Hidden reserves count toward the auction volume.");
+    const auto result = book.uncross();
+    expect_book_invariants(book);
+    expect(result.matched_quantity == 40U && result.trades.size() == 4U, "The iceberg fills tranche by tranche.");
+    expect_equal(expect_value(book.get_order(1), "The iceberg keeps its remainder.").remaining_quantity,
+                 tradematch::Quantity{10},
+                 "10 of 50 remain.");
+}
+
+void test_uncross_triggers_stops_and_handles_empty_auctions() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    tradematch::OrderBook book;
+    submit_checked(book, {1, Side::Sell, OrderType::Limit, 1, 10000});
+    submit_checked(book, {2, Side::Buy, OrderType::Limit, 1, 10000});
+    submit_checked(book, stop_order(3, Side::Buy, 5, 10100));
+    submit_checked(book, {4, Side::Sell, OrderType::Limit, 5, 10300});
+
+    book.begin_auction();
+    submit_checked(book, {5, Side::Buy, OrderType::Limit, 10, 10200});
+    submit_checked(book, {6, Side::Sell, OrderType::Limit, 10, 10200});
+    const auto result = book.uncross();
+    expect(result.executed && result.price == 10200, "The auction prints at 102.00.");
+    expect(std::ranges::equal(result.triggered_stops, std::vector<tradematch::OrderId>{3}),
+           "The auction price triggers the buy stop once trading resumes.");
+    expect(result.trades.back().buy_order_id == 3U && !result.trades.back().auction,
+           "The stop trades in continuous trading, after the auction trades.");
+
+    book.begin_auction();
+    const auto empty = book.uncross();
+    expect(!empty.executed && empty.trades.empty() && book.phase() == tradematch::TradingPhase::Continuous,
+           "An auction without crossing interest simply ends.");
+    expect(!book.indicative_auction().has_value(), "No indicative price outside an auction.");
+}
+
 void test_formatting_helpers() {
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Buy)}, std::string{"BUY"}, "Buy side label.");
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Sell)}, std::string{"SELL"}, "Sell side label.");
@@ -946,6 +1099,7 @@ void test_formatting_helpers() {
         {RejectReason::InvalidStopPrice, "INVALID_STOP_PRICE"},
         {RejectReason::InvalidDisplayQuantity, "INVALID_DISPLAY_QUANTITY"},
         {RejectReason::UnknownSymbol, "UNKNOWN_SYMBOL"},
+        {RejectReason::NotAllowedInAuction, "NOT_ALLOWED_IN_AUCTION"},
     };
     for (const auto& [mode, name] : std::vector<std::pair<tradematch::SelfTradePrevention, std::string>>{
              {tradematch::SelfTradePrevention::None, "NONE"},
@@ -1019,6 +1173,14 @@ int run_all_tests() {
         {"iceberg_validation_and_amend", test_iceberg_validation_and_amend},
         {"self_trade_prevention_modes", test_self_trade_prevention_modes},
         {"fill_or_kill_respects_self_trade_prevention", test_fill_or_kill_respects_self_trade_prevention},
+        {"auction_collects_orders_without_matching", test_auction_collects_orders_without_matching},
+        {"auction_rejects_immediate_and_post_only_orders", test_auction_rejects_immediate_and_post_only_orders},
+        {"uncross_maximizes_executed_volume", test_uncross_maximizes_executed_volume},
+        {"uncross_follows_market_pressure_and_reference_price",
+         test_uncross_follows_market_pressure_and_reference_price},
+        {"auction_market_orders_fill_first_and_expire", test_auction_market_orders_fill_first_and_expire},
+        {"auction_counts_iceberg_reserves", test_auction_counts_iceberg_reserves},
+        {"uncross_triggers_stops_and_handles_empty_auctions", test_uncross_triggers_stops_and_handles_empty_auctions},
         {"replace_rejects_invalid_request_without_removing_resting_order",
          test_replace_rejects_invalid_request_without_removing_resting_order},
         {"replace_rejects_side_change", test_replace_rejects_side_change},

@@ -96,6 +96,8 @@ int run(int argc, char** argv) {
         totals.day_expiries += stats.day_expiries;
         totals.stops_triggered += stats.stops_triggered;
         totals.self_trade_cancels += stats.self_trade_cancels;
+        totals.auctions += stats.auctions;
+        totals.auction_trades += stats.auction_trades;
         totals.max_resting_orders = std::max(totals.max_resting_orders, stats.max_resting_orders);
     }
 
@@ -105,6 +107,7 @@ int run(int argc, char** argv) {
               << " cancels=" << totals.cancels << " replaces=" << totals.replaces
               << " amends_in_place=" << totals.amends_in_place << " day_expiries=" << totals.day_expiries
               << " stops_triggered=" << totals.stops_triggered << " self_trade_cancels=" << totals.self_trade_cancels
+              << " auctions=" << totals.auctions << " auction_trades=" << totals.auction_trades
               << " max_resting_orders=" << totals.max_resting_orders << '\n';
     return 0;
 }

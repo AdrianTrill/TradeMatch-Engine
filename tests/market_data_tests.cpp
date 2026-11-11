@@ -100,6 +100,14 @@ void test_depth_replica_tracks_the_engine_exactly() {
                     book.expire_day_orders();
                     generator_view.expire_day_orders();
                     break;
+                case OpKind::BeginAuction:
+                    book.begin_auction();
+                    generator_view.begin_auction();
+                    break;
+                case OpKind::Uncross:
+                    result_trades = book.uncross().trades;
+                    generator_view.uncross();
+                    break;
             }
             expect(same_trades(result_trades, listener.trades), "Streamed trades should equal the result's trades.");
             expect_replica_matches(book, listener.replica, step);

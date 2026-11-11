@@ -28,8 +28,8 @@ struct BookCapacity {
 //
 // Order handling: limit and market orders; stop and stop-limit orders triggered by the last trade price; iceberg
 // orders that display one tranche at a time; GTC, DAY, IOC, and FOK time in force; post-only orders that are rejected
-// rather than take liquidity; self-trade prevention; and replace, which keeps time priority when only the quantity
-// goes down.
+// rather than take liquidity; self-trade prevention; replace, which keeps time priority when only the quantity goes
+// down; and call auctions with a single-price uncross.
 //
 // All storage is index based and reused:
 // - Resting orders live in a pooled array and form an intrusive FIFO list per price level.
@@ -50,6 +50,24 @@ public:
 
     // End-of-day processing: cancels every resting or pending DAY order and returns their IDs in ascending order.
     std::vector<OrderId> expire_day_orders();
+
+    // Call auctions, as used for exchange opens and closes. begin_auction() stops matching: limit orders rest even
+    // when they cross, market orders queue for the uncross, and IOC, FOK, and post-only orders are rejected.
+    // uncross() executes everything that crosses at a single equilibrium price, expires unfilled market orders, and
+    // returns the book to continuous trading. indicative_auction() reports what an uncross would do right now.
+    void begin_auction() noexcept {
+        phase_ = TradingPhase::Auction;
+    }
+    AuctionResult uncross();
+    std::optional<AuctionIndicative> indicative_auction() const;
+
+    TradingPhase phase() const noexcept {
+        return phase_;
+    }
+
+    std::size_t auction_market_order_count() const noexcept {
+        return auction_buys_.size() + auction_sells_.size();
+    }
 
     // Attaches a market data listener (or detaches it with nullptr). The book does no market data bookkeeping while
     // no listener is attached.
@@ -135,6 +153,19 @@ private:
         auto operator<=>(const TouchedLevel&) const = default;
     };
 
+    struct AuctionMarketOrder {
+        OrderId order_id{};
+        Quantity quantity{};
+        TimeInForce time_in_force{TimeInForce::GoodTillCancel};
+    };
+
+    struct Equilibrium {
+        Price price{};
+        Volume matched{};
+        Volume buy_volume{};
+        Volume sell_volume{};
+    };
+
     struct Rejection {
         RejectReason reason{RejectReason::None};
         std::string_view message;
@@ -174,6 +205,10 @@ private:
     Slot find_or_create_level(Side side, Price price);
     void remove_level(Slot level_slot);
     Ladder::const_iterator find_ladder_entry(Side side, Price price) const;
+    std::optional<Equilibrium> find_equilibrium() const;
+    void execute_auction(Price price, Volume quantity);
+    bool remove_auction_market_order(OrderId order_id, Quantity& quantity);
+    bool has_auction_market_order(OrderId order_id) const noexcept;
     void record_trade(Side aggressor_side,
                       OrderId aggressor_id,
                       OrderId resting_order_id,
@@ -210,6 +245,11 @@ private:
     std::vector<Trade> trades_;
     std::vector<OrderId> triggered_;
     std::vector<OrderId> self_trade_cancels_;
+    std::vector<AuctionMarketOrder> auction_buys_;   // FIFO
+    std::vector<AuctionMarketOrder> auction_sells_;  // FIFO
+    std::vector<OrderId> expired_market_orders_;
+    TradingPhase phase_{TradingPhase::Continuous};
+
     std::optional<Price> last_trade_price_;
     BookListener* listener_{nullptr};
     std::vector<TouchedLevel> touched_levels_;

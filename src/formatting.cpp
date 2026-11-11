@@ -91,6 +91,8 @@ const char* to_string(RejectReason reason) noexcept {
             return "INVALID_DISPLAY_QUANTITY";
         case RejectReason::UnknownSymbol:
             return "UNKNOWN_SYMBOL";
+        case RejectReason::NotAllowedInAuction:
+            return "NOT_ALLOWED_IN_AUCTION";
     }
 
     return "UNKNOWN";

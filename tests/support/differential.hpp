@@ -19,7 +19,9 @@ enum class OpKind : std::uint8_t {
     Submit,
     Cancel,
     Replace,
-    ExpireDay
+    ExpireDay,
+    BeginAuction,
+    Uncross
 };
 
 struct Operation {
@@ -45,6 +47,10 @@ inline std::string describe(const Operation& op) {
             break;
         case OpKind::ExpireDay:
             return "EXPIRE_DAY_ORDERS";
+        case OpKind::BeginAuction:
+            return "BEGIN_AUCTION";
+        case OpKind::Uncross:
+            return "UNCROSS";
     }
     out << "id=" << op.order.order_id << ' ' << to_string(op.order.side) << ' ' << to_string(op.order.type)
         << " qty=" << op.order.quantity << " price=" << op.order.price << ' ' << to_string(op.order.time_in_force)
@@ -71,6 +77,8 @@ public:
         std::size_t day_expiries{0};
         std::size_t stops_triggered{0};
         std::size_t self_trade_cancels{0};
+        std::size_t auctions{0};
+        std::size_t auction_trades{0};
         std::size_t max_resting_orders{0};
     };
 
@@ -109,6 +117,17 @@ public:
                     mismatch = "expire_day_orders returned different order IDs";
                 }
                 stats_.day_expiries += engine_expired.size();
+                break;
+            }
+            case OpKind::BeginAuction:
+                engine_.begin_auction();
+                reference_.begin_auction();
+                break;
+            case OpKind::Uncross: {
+                const auto result = engine_.uncross();
+                mismatch = compare_uncross(result, reference_.uncross());
+                stats_.auctions += result.executed ? 1U : 0U;
+                stats_.auction_trades += result.executed ? result.trades.size() : 0U;
                 break;
             }
         }
@@ -157,6 +176,9 @@ private:
         if (engine.aggressor_side != reference.aggressor_side) {
             return prefix + "aggressor_side differs";
         }
+        if (engine.auction != reference.auction) {
+            return prefix + "auction flag differs";
+        }
         return {};
     }
 
@@ -180,6 +202,11 @@ private:
         }
         if (engine.expired != reference.expired) {
             return field((prefix + "expired").c_str(), engine.expired, reference.expired);
+        }
+        if (engine.queued_for_auction != reference.queued_for_auction) {
+            return field((prefix + "queued_for_auction").c_str(),
+                         engine.queued_for_auction,
+                         reference.queued_for_auction);
         }
         if (engine.pending_trigger != reference.pending_trigger) {
             return field((prefix + "pending_trigger").c_str(), engine.pending_trigger, reference.pending_trigger);
@@ -209,6 +236,34 @@ private:
             if (!mismatch.empty()) {
                 return prefix + mismatch;
             }
+        }
+        return {};
+    }
+
+    static std::string compare_uncross(const AuctionResult& engine, const AuctionResult& reference) {
+        if (engine.executed != reference.executed) {
+            return field("uncross.executed", engine.executed, reference.executed);
+        }
+        if (engine.price != reference.price) {
+            return field("uncross.price", engine.price, reference.price);
+        }
+        if (engine.matched_quantity != reference.matched_quantity) {
+            return field("uncross.matched_quantity", engine.matched_quantity, reference.matched_quantity);
+        }
+        if (engine.trades.size() != reference.trades.size()) {
+            return field("uncross.trade_count", engine.trades.size(), reference.trades.size());
+        }
+        for (std::size_t index = 0; index < engine.trades.size(); ++index) {
+            auto mismatch = compare_trade(engine.trades[index], reference.trades[index], index);
+            if (!mismatch.empty()) {
+                return "uncross." + mismatch;
+            }
+        }
+        if (!std::ranges::equal(engine.expired_market_orders, reference.expired_market_orders)) {
+            return "uncross.expired_market_orders differ";
+        }
+        if (!std::ranges::equal(engine.triggered_stops, reference.triggered_stops)) {
+            return "uncross.triggered_stops differ";
         }
         return {};
     }
@@ -290,6 +345,24 @@ private:
         if (engine_.best_ask() != reference_.best_ask()) {
             return field("best_ask", engine_.best_ask().value_or(-1), reference_.best_ask().value_or(-1));
         }
+        if (engine_.phase() != reference_.phase()) {
+            return "phase differs";
+        }
+        // Outside an auction the book can never stay crossed; in particular, every uncross must leave it uncrossed.
+        if (engine_.phase() == TradingPhase::Continuous && engine_.best_bid() && engine_.best_ask() &&
+            *engine_.best_bid() >= *engine_.best_ask()) {
+            return "the book is crossed in continuous trading";
+        }
+        if (engine_.auction_market_order_count() != reference_.auction_market_order_count()) {
+            return field("auction_market_order_count",
+                         engine_.auction_market_order_count(),
+                         reference_.auction_market_order_count());
+        }
+        if (engine_.indicative_auction() != reference_.indicative_auction()) {
+            const auto engine_price = engine_.indicative_auction().value_or(AuctionIndicative{}).price;
+            const auto reference_price = reference_.indicative_auction().value_or(AuctionIndicative{}).price;
+            return field("indicative_auction.price", engine_price, reference_price) + " (or volumes differ)";
+        }
         if (engine_.stop_order_count() != reference_.stop_order_count()) {
             return field("stop_order_count", engine_.stop_order_count(), reference_.stop_order_count());
         }
@@ -330,6 +403,13 @@ public:
     explicit OperationGenerator(std::uint64_t seed) : rng_(seed) {}
 
     Operation next(const ReferenceBook& book) {
+        // Occasional call auctions: open one about every 150 operations, then uncross after about 30.
+        if (uniform(0, in_auction_ ? 29 : 149) == 0) {
+            Operation op;
+            op.kind = in_auction_ ? OpKind::Uncross : OpKind::BeginAuction;
+            in_auction_ = !in_auction_;
+            return op;
+        }
         const auto roll = uniform(0, 199);
         if (roll == 0) {
             Operation op;
@@ -492,6 +572,7 @@ private:
     static constexpr std::size_t kRecentWindow = 64;
 
     std::mt19937_64 rng_;
+    bool in_auction_{false};
     OrderId next_id_{1};
     std::vector<OrderId> recent_ids_;
     std::size_t recent_cursor_{0};
@@ -561,7 +642,13 @@ private:
         if (selector < 208) {
             return OpKind::Cancel;
         }
-        return selector < 250 ? OpKind::Replace : OpKind::ExpireDay;
+        if (selector < 250) {
+            return OpKind::Replace;
+        }
+        if (selector < 253) {
+            return OpKind::ExpireDay;
+        }
+        return selector == 253 ? OpKind::BeginAuction : OpKind::Uncross;
     }
 
     std::uint8_t byte() noexcept {
