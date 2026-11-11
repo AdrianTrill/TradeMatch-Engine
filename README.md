@@ -112,7 +112,14 @@ This yields:
 │   ├── formatting.cpp
 │   └── order_book.cpp
 ├── tests/
-│   └── order_book_tests.cpp
+│   ├── differential_tests.cpp
+│   ├── order_book_tests.cpp
+│   └── support/
+│       ├── differential.hpp
+│       └── reference_book.hpp
+├── fuzz/
+│   ├── order_book_fuzzer.cpp
+│   └── standalone_main.cpp
 └── tools/
     ├── benchmark_main.cpp
     └── demo_main.cpp
@@ -228,6 +235,28 @@ The test suite covers deterministic scenarios that matter for correctness:
 - market-order expiry of any unfilled remainder
 - invalid and duplicate-order rejection
 - invariant checks after every submit, cancel, and replace
+
+## Differential Testing and Fuzzing
+
+Hand-written scenarios only cover the cases someone thought of. To catch the rest, the engine is checked against a second, deliberately naive implementation ([tests/support/reference_book.hpp](tests/support/reference_book.hpp)). The reference keeps every resting order in one flat vector and finds the best match with a linear scan, so it is slow but easy to verify by reading.
+
+- **Randomized differential test** (`tradematch_differential_tests`): runs 400,000 adversarial operations (200 seeds x 2,000) through both books. The flow uses a narrow price band so orders constantly cross, small sizes so partial fills are common, and a steady stream of invalid, duplicate, and unknown-ID requests. After every operation it compares result flags, quantities, every trade field, the full depth snapshot including FIFO order IDs, and order lookups. A failure prints the seed, the diverging operation, and a one-line reproduction command.
+- **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow and aborts on the first engine/reference mismatch. CI fuzzes it for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps the target compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
+
+The harness has been checked by mutation testing. Each of these injected bugs is caught within the first 63 operations: trading at the aggressor's price, an off-by-one in the limit-price check, and LIFO instead of FIFO queue order.
+
+```bash
+make test        # unit tests + 400k-operation differential test + fuzz smoke test
+make fuzz-long   # 10M-operation soak: 2,000 seeds x 5,000 operations
+
+# Reproduce a reported failure
+./build/tradematch_differential_tests --seed 1234 --ops 5000
+
+# Coverage-guided fuzzing (LLVM clang on Linux)
+cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
+cmake --build build-fuzz --target tradematch_fuzzer
+./build-fuzz/tradematch_fuzzer -max_total_time=60
+```
 
 ## Why This Project Matters
 

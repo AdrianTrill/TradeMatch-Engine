@@ -24,3 +24,43 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
+
+  fuzz:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure release build for the differential soak
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build differential tests
+        run: cmake --build build --target tradematch_differential_tests --parallel
+
+      - name: Differential soak (2,000 seeds x 5,000 operations)
+        run: ./build/tradematch_differential_tests --seeds 2000 --ops 5000
+
+      - name: Configure libFuzzer build
+        run: >
+          cmake -S . -B build-fuzz -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++
+          -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
+
+      - name: Build libFuzzer target (ASan + UBSan)
+        run: cmake --build build-fuzz --target tradematch_fuzzer --parallel
+
+      - name: Coverage-guided fuzzing for 60 seconds
+        run: |
+          mkdir -p fuzz-corpus
+          ./build-fuzz/tradematch_fuzzer fuzz-corpus -max_total_time=60 -max_len=4096 -print_final_stats=1
+
+      - name: Upload crash reproducers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            leak-*
+            timeout-*
+          if-no-files-found: ignore
