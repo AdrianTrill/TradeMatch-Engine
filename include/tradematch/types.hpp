@@ -12,6 +12,7 @@ using OrderId = std::uint64_t;
 using TradeId = std::uint64_t;
 using Price = std::int64_t;  // Integer price ticks, represented as cents in the demo and tests.
 using Quantity = std::uint32_t;
+using Volume = std::uint64_t;  // Aggregated quantity (level totals, traded volume) that can exceed one order's size.
 using SequenceNumber = std::uint64_t;
 
 enum class Side {
@@ -77,7 +78,7 @@ struct RestingOrderView {
 
 struct PriceLevelView {
     Price price{};
-    Quantity total_quantity{};
+    Volume total_quantity{};
     std::size_t order_count{};
     std::vector<OrderId> order_ids;
 };

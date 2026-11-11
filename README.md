@@ -31,7 +31,7 @@ Core public API:
 
 - `submit(OrderRequest)` submits a new order and returns fills, remaining quantity, and any generated trades.
 - `cancel(OrderId)` removes a resting order by ID and reports the cancelled quantity.
-- `replace(OrderRequest)` validates, cancels, and resubmits an active order using the same ID.
+- `replace(OrderRequest)` validates, cancels, and resubmits an active order using the same ID. The replacement must keep the resting order's side and limit type.
 - `get_order(OrderId)` returns the current resting state for an active order.
 - `get_orders_at_level(Side, Price)` exposes FIFO order state for a price level.
 - `snapshot()` returns visible bid/ask levels for inspection and tests.
@@ -58,6 +58,8 @@ The engine follows standard price-time priority:
 - Market orders consume available liquidity and never rest in the book.
 - Unfilled market quantity expires immediately.
 - Replace is implemented as cancel plus resubmit, so the replaced order loses its original time priority.
+- Replace may change price and quantity, but never the side or the limit order type; such requests are rejected and the resting order is left untouched.
+- Aggregated quantities (price-level totals) are 64-bit, so they never overflow even when many large orders share a level.
 
 ## System Design
 
@@ -128,6 +130,8 @@ Fastest path:
 ```bash
 make
 ```
+
+The Makefile compiles each source file to an object with generated dependency files, so editing a header rebuilds exactly the objects that include it.
 
 CMake alternative:
 
@@ -218,6 +222,8 @@ The test suite covers deterministic scenarios that matter for correctness:
 - price-time priority at the same price
 - cancel order
 - replace order priority reset
+- replace rejecting side or order-type changes
+- 64-bit price-level totals that do not overflow
 - unmatched order resting in the book
 - market-order expiry of any unfilled remainder
 - invalid and duplicate-order rejection

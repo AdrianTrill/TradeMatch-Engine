@@ -134,6 +134,16 @@ ReplaceResult OrderBook::replace(const OrderRequest& replacement) {
         return result;
     }
 
+    if (replacement.side != existing_order_it->second.side) {
+        result.message = "Replace cannot change the order side.";
+        return result;
+    }
+
+    if (replacement.type != OrderType::Limit) {
+        result.message = "Replace must keep the limit order type of the resting order.";
+        return result;
+    }
+
     const auto validation_error = validate_request(replacement, replacement.order_id);
     if (!validation_error.empty()) {
         result.message = validation_error;

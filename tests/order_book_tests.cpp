@@ -51,7 +51,7 @@ void expect_book_invariants(const tradematch::OrderBook& book) {
             const auto resting_orders = book.get_orders_at_level(side, level.price);
             expect_equal(resting_orders.size(), level.order_count, "Level order count should match indexed orders.");
 
-            tradematch::Quantity level_quantity_sum = 0;
+            tradematch::Volume level_quantity_sum = 0;
             tradematch::SequenceNumber previous_sequence = 0;
             bool has_previous_sequence = false;
 
@@ -284,6 +284,52 @@ void test_replace_rejects_invalid_request_without_removing_resting_order() {
                  "Rejected replacement should preserve the old quantity.");
 }
 
+void test_replace_rejects_side_change() {
+    tradematch::OrderBook book;
+
+    submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10000});
+    submit_checked(book, {2, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 9900});
+
+    const auto replace = replace_checked(book, {1, tradematch::Side::Sell, tradematch::OrderType::Limit, 50, 9900});
+    expect(!replace.replaced, "Replace must not flip a resting buy into a sell.");
+    expect_equal(replace.submit_result.trades.size(), std::size_t{0}, "Rejected replace must not trade.");
+
+    const auto order = book.get_order(1);
+    expect(order.has_value(), "Original order should survive a rejected side change.");
+    expect(order->side == tradematch::Side::Buy, "Original order should keep its side.");
+    expect_equal(order->remaining_quantity, tradematch::Quantity{100}, "Original order should keep its quantity.");
+    expect(book.has_order(2), "Other resting orders must be untouched.");
+}
+
+void test_replace_rejects_order_type_change() {
+    tradematch::OrderBook book;
+
+    submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10000});
+    submit_checked(book, {2, tradematch::Side::Sell, tradematch::OrderType::Limit, 100, 10100});
+
+    const auto replace = replace_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Market, 50, 0});
+    expect(!replace.replaced, "Replace must not turn a resting limit order into a market order.");
+    expect_equal(replace.submit_result.trades.size(), std::size_t{0}, "Rejected replace must not trade.");
+
+    const auto order = book.get_order(1);
+    expect(order.has_value(), "Original order should survive a rejected type change.");
+    expect_equal(order->price, tradematch::Price{10000}, "Original order should keep its price.");
+    expect_equal(book.order_count(), std::size_t{2}, "Book should be unchanged after a rejected replace.");
+}
+
+void test_level_quantity_does_not_overflow() {
+    tradematch::OrderBook book;
+
+    submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 3000000000U, 10000});
+    submit_checked(book, {2, tradematch::Side::Buy, tradematch::OrderType::Limit, 3000000000U, 10000});
+
+    const auto snapshot = book.snapshot();
+    expect_equal(snapshot.bids.size(), std::size_t{1}, "Both orders should share one price level.");
+    expect_equal(snapshot.bids.front().total_quantity,
+                 tradematch::Volume{6000000000ULL},
+                 "Level totals must not wrap around at 32 bits.");
+}
+
 struct TestCase {
     const char* name;
     std::function<void()> run;
@@ -304,6 +350,9 @@ int main() {
         {"replace_order_resets_time_priority", test_replace_order_resets_time_priority},
         {"replace_rejects_invalid_request_without_removing_resting_order",
          test_replace_rejects_invalid_request_without_removing_resting_order},
+        {"replace_rejects_side_change", test_replace_rejects_side_change},
+        {"replace_rejects_order_type_change", test_replace_rejects_order_type_change},
+        {"level_quantity_does_not_overflow", test_level_quantity_does_not_overflow},
     };
 
     std::size_t failures = 0;
