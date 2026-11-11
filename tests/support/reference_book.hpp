@@ -138,8 +138,29 @@ public:
         return orders_.size();
     }
 
+    std::optional<Price> best_bid() const {
+        return best_price(Side::Buy);
+    }
+
+    std::optional<Price> best_ask() const {
+        return best_price(Side::Sell);
+    }
+
 private:
     using Orders = std::vector<RestingOrderView>;
+
+    std::optional<Price> best_price(Side side) const {
+        std::optional<Price> best;
+        for (const auto& order : orders_) {
+            if (order.side != side) {
+                continue;
+            }
+            if (!best || (side == Side::Buy ? order.price > *best : order.price < *best)) {
+                best = order.price;
+            }
+        }
+        return best;
+    }
 
     static bool is_valid(const OrderRequest& order) {
         if (order.order_id == 0U || order.quantity == 0U || order.price < 0) {

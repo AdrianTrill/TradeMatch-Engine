@@ -54,8 +54,12 @@ target_link_libraries(tradematch_engine PRIVATE tradematch_project_options)
 add_executable(tradematch_demo tools/demo_main.cpp)
 target_link_libraries(tradematch_demo PRIVATE tradematch_engine tradematch_project_options)
 
-add_executable(tradematch_benchmark tools/benchmark_main.cpp)
-target_link_libraries(tradematch_benchmark PRIVATE tradematch_engine tradematch_project_options)
+add_library(tradematch_bench_support STATIC bench/workload.cpp)
+target_include_directories(tradematch_bench_support PUBLIC ${PROJECT_SOURCE_DIR}/bench)
+target_link_libraries(tradematch_bench_support PUBLIC tradematch_engine PRIVATE tradematch_project_options)
+
+add_executable(tradematch_benchmark bench/benchmark_main.cpp)
+target_link_libraries(tradematch_benchmark PRIVATE tradematch_bench_support tradematch_project_options)
 
 include(CTest)
 
@@ -74,6 +78,13 @@ if(BUILD_TESTING)
     target_include_directories(tradematch_fuzz_standalone PRIVATE ${PROJECT_SOURCE_DIR}/tests)
     target_link_libraries(tradematch_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_fuzz_smoke COMMAND tradematch_fuzz_standalone --iterations 500)
+
+    add_executable(tradematch_bench_tests tests/bench_tests.cpp)
+    target_link_libraries(tradematch_bench_tests PRIVATE tradematch_bench_support tradematch_project_options)
+    add_test(NAME tradematch_bench_tests COMMAND tradematch_bench_tests)
+
+    add_test(NAME tradematch_benchmark_smoke
+             COMMAND tradematch_benchmark --ops 20000 --warmup 2000 --prefill 1000 --no-distribution)
 endif()
 
 if(TRADEMATCH_LIBFUZZER)

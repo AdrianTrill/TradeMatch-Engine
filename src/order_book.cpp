@@ -220,6 +220,20 @@ std::vector<RestingOrderView> OrderBook::get_orders_at_level(Side side, Price pr
     return orders;
 }
 
+std::optional<Price> OrderBook::best_bid() const {
+    if (bids_.empty()) {
+        return std::nullopt;
+    }
+    return bids_.begin()->first;
+}
+
+std::optional<Price> OrderBook::best_ask() const {
+    if (asks_.empty()) {
+        return std::nullopt;
+    }
+    return asks_.begin()->first;
+}
+
 BookSnapshot OrderBook::snapshot() const {
     BookSnapshot book_snapshot;
 

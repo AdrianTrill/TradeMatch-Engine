@@ -383,6 +383,24 @@ void test_level_lookup_for_missing_price_is_empty() {
     expect(!book.get_order(42).has_value(), "Unknown order IDs should not resolve.");
 }
 
+void test_top_of_book_tracks_best_prices() {
+    tradematch::OrderBook book;
+    expect(!book.best_bid().has_value() && !book.best_ask().has_value(), "An empty book has no top of book.");
+
+    submit_checked(book, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 10, 9900});
+    submit_checked(book, {2, tradematch::Side::Buy, tradematch::OrderType::Limit, 10, 9950});
+    submit_checked(book, {3, tradematch::Side::Sell, tradematch::OrderType::Limit, 10, 10100});
+    submit_checked(book, {4, tradematch::Side::Sell, tradematch::OrderType::Limit, 10, 10050});
+    expect_equal(book.best_bid().value_or(0), tradematch::Price{9950}, "Best bid is the highest bid.");
+    expect_equal(book.best_ask().value_or(0), tradematch::Price{10050}, "Best ask is the lowest ask.");
+
+    submit_checked(book, {5, tradematch::Side::Buy, tradematch::OrderType::Market, 10, 0});
+    expect_equal(book.best_ask().value_or(0), tradematch::Price{10100}, "Consuming the best ask exposes the next.");
+
+    cancel_checked(book, 2);
+    expect_equal(book.best_bid().value_or(0), tradematch::Price{9900}, "Cancelling the best bid exposes the next.");
+}
+
 void test_formatting_helpers() {
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Buy)}, std::string{"BUY"}, "Buy side label.");
     expect_equal(std::string{tradematch::to_string(tradematch::Side::Sell)}, std::string{"SELL"}, "Sell side label.");
@@ -428,6 +446,7 @@ int run_all_tests() {
         {"level_quantity_does_not_overflow", test_level_quantity_does_not_overflow},
         {"replace_that_crosses_the_book_fills_immediately", test_replace_that_crosses_the_book_fills_immediately},
         {"level_lookup_for_missing_price_is_empty", test_level_lookup_for_missing_price_is_empty},
+        {"top_of_book_tracks_best_prices", test_top_of_book_tracks_best_prices},
         {"formatting_helpers", test_formatting_helpers},
     };
 

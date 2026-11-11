@@ -1,6 +1,6 @@
 CXX ?= c++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic -Wshadow
-CPPFLAGS += -Iinclude -Itests
+CPPFLAGS += -Iinclude -Itests -Ibench
 DEPFLAGS = -MMD -MP
 BUILD_DIR ?= build
 OBJ_DIR := $(BUILD_DIR)/obj
@@ -13,6 +13,7 @@ BENCH_BIN := $(BUILD_DIR)/tradematch_benchmark
 TEST_BIN := $(BUILD_DIR)/tradematch_tests
 DIFF_TEST_BIN := $(BUILD_DIR)/tradematch_differential_tests
 FUZZ_BIN := $(BUILD_DIR)/tradematch_fuzz_standalone
+BENCH_TEST_BIN := $(BUILD_DIR)/tradematch_bench_tests
 
 SOURCES = $(shell git ls-files '*.cpp' '*.hpp')
 JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
@@ -30,16 +31,18 @@ endif
 
 ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tools/demo_main.o \
-	$(OBJ_DIR)/tools/benchmark_main.o \
+	$(OBJ_DIR)/bench/benchmark_main.o \
+	$(OBJ_DIR)/bench/workload.o \
 	$(OBJ_DIR)/tests/order_book_tests.o \
 	$(OBJ_DIR)/tests/differential_tests.o \
+	$(OBJ_DIR)/tests/bench_tests.o \
 	$(OBJ_DIR)/fuzz/order_book_fuzzer.o \
 	$(OBJ_DIR)/fuzz/standalone_main.o
 
 .PHONY: all test demo benchmark fuzz-long format format-check lint sanitize coverage cmake-configure \
 	cmake-build clean
 
-all: $(DEMO_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN)
+all: $(DEMO_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN)
 
 # Each object also emits a .d file listing the headers it includes, so header edits trigger rebuilds.
 $(OBJ_DIR)/%.o: %.cpp
@@ -49,7 +52,7 @@ $(OBJ_DIR)/%.o: %.cpp
 $(DEMO_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/demo_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
-$(BENCH_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/benchmark_main.o
+$(BENCH_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/bench/benchmark_main.o $(OBJ_DIR)/bench/workload.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/order_book_tests.o
@@ -58,11 +61,15 @@ $(TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/order_book_tests.o
 $(DIFF_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/differential_tests.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
+$(BENCH_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/bench_tests.o $(OBJ_DIR)/bench/workload.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 $(FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/order_book_fuzzer.o $(OBJ_DIR)/fuzz/standalone_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
-test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN)
+test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN)
 	./$(TEST_BIN)
+	./$(BENCH_TEST_BIN)
 	./$(DIFF_TEST_BIN)
 	./$(FUZZ_BIN) --iterations 500
 

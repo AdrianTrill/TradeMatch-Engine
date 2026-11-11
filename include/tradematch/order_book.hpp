@@ -21,6 +21,8 @@ public:
     bool has_order(OrderId order_id) const;
     std::optional<RestingOrderView> get_order(OrderId order_id) const;
     std::vector<RestingOrderView> get_orders_at_level(Side side, Price price) const;
+    std::optional<Price> best_bid() const;
+    std::optional<Price> best_ask() const;
     BookSnapshot snapshot() const;
 
     std::size_t order_count() const noexcept {

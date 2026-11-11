@@ -122,7 +122,14 @@ This yields:
 ├── src/
 │   ├── formatting.cpp
 │   └── order_book.cpp
+├── bench/
+│   ├── benchmark_main.cpp
+│   ├── latency_histogram.hpp
+│   ├── system_info.hpp
+│   ├── workload.cpp
+│   └── workload.hpp
 ├── tests/
+│   ├── bench_tests.cpp
 │   ├── differential_tests.cpp
 │   ├── order_book_tests.cpp
 │   └── support/
@@ -132,7 +139,6 @@ This yields:
 │   ├── order_book_fuzzer.cpp
 │   └── standalone_main.cpp
 └── tools/
-    ├── benchmark_main.cpp
     └── demo_main.cpp
 ```
 
@@ -187,11 +193,12 @@ Demo:
 ./build/tradematch_demo
 ```
 
-Benchmark:
+Benchmark (see [Performance](#performance)):
 
 ```bash
-./build/tradematch_benchmark
-./build/tradematch_benchmark 500000
+./build/tradematch_benchmark                       # 1M measured operations, latency table + distribution
+./build/tradematch_benchmark 500000                # custom measured operation count
+./build/tradematch_benchmark --seed 7 --json out.json
 ```
 
 Tests:
@@ -269,7 +276,10 @@ The test suite covers deterministic scenarios that matter for correctness:
 - replace that crosses the book and fills immediately
 - lookups for missing price levels and unknown order IDs
 - price formatting at the extremes of the 64-bit range
+- best bid / best ask tracking as levels are consumed and cancelled
 - invariant checks after every submit, cancel, and replace
+
+The benchmark tooling has its own tests ([tests/bench_tests.cpp](tests/bench_tests.cpp)). They check that histogram percentiles stay within the documented error bound against exact sorted percentiles, that the workload generator is deterministic per seed, and that every generated stream replays with zero rejected commands.
 
 ## Differential Testing and Fuzzing
 
@@ -293,6 +303,33 @@ cmake --build build-fuzz --target tradematch_fuzzer
 ./build-fuzz/tradematch_fuzzer -max_total_time=60
 ```
 
+## Performance
+
+`tradematch_benchmark` measures per-operation latency on realistic order flow, not just average throughput.
+
+**Workload.** A generator produces a deterministic stream that resembles real exchange traffic. Passive limit orders cluster near the touch, at a geometric distance behind the best price. Cancels and modifies always target orders that are still live. Aggressive orders are marketable limits that can sweep several levels, or market orders. The book is prefilled with 10,000 resting orders, and the flow keeps it near that depth, so measurements reflect a steady state rather than a growing book. The realized mix is 46% add, 39% cancel, 8% modify, and 7% aggressive, close to the message proportions of public exchange feeds.
+
+**Method.** The whole stream is generated before timing starts, so generator cost never reaches the measured loop and every engine replays identical input. After 100,000 warm-up operations, each of the 1,000,000 measured operations is timed individually and recorded in an HDR-style log-linear histogram. Its reported percentiles are never below the true value and at most 0.8% above it. Throughput comes from a second replay with no clock reads in the loop.
+
+Results on an Apple M4 (Apple clang 21, Release build, median of 5 runs by p99):
+
+| operation | count | p50 | p90 | p99 | p99.9 | p99.99 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| add | 459,871 | 83 ns | 125 ns | 166 ns | 375 ns | 3,967 ns |
+| cancel | 390,361 | 42 ns | 84 ns | 167 ns | 543 ns | 3,583 ns |
+| modify | 80,097 | 167 ns | 209 ns | 333 ns | 875 ns | 8,959 ns |
+| aggressive | 69,671 | 125 ns | 209 ns | 375 ns | 959 ns | 4,639 ns |
+| **all** | **1,000,000** | **83 ns** | **166 ns** | **250 ns** | **587 ns** | **4,767 ns** |
+
+Throughput: **10.4 million operations per second** on a single core, producing 139,000 trades.
+
+Notes for reading the numbers:
+
+- Apple Silicon's user-space clock ticks at 24 MHz, so samples are quantized to about 41 ns. Linux on x86 reports nanosecond resolution.
+- Every sample includes one clock read, about 13 ns.
+- Percentiles up to p99.9 are stable across runs. p99.99 and the maximum mostly reflect operating-system noise (interrupts, page faults, scheduler preemption) on a desktop machine.
+- Each submit in this engine allocates map nodes, list nodes, the trade vector, and the result message, and those allocations dominate the tail.
+
 ## Continuous Integration
 
 Every push runs two workflows:
@@ -303,6 +340,7 @@ Every push runs two workflows:
 | CI | Sanitizers | Every test under AddressSanitizer (with leak detection) and UndefinedBehaviorSanitizer |
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
 | CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
+| CI | Benchmark smoke test | `tradematch_benchmark` runs a short workload under CTest on every platform |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 97% of lines and branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
 | Fuzz | libFuzzer | Coverage-guided fuzzing under ASan + UBSan: 60 seconds per push and 20 minutes nightly. The corpus is cached between runs, so coverage keeps growing |
@@ -317,5 +355,4 @@ It is also a strong stepping stone for deeper systems work: market data fan-out,
 
 - IOC/FOK and post-only order policies
 - Snapshot serialization and replayable input streams
-- Latency histograms and richer benchmark reporting
 - Market data feed generation from execution events

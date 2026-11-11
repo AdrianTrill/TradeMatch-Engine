@@ -230,6 +230,13 @@ private:
             return field("order_count", engine_.order_count(), reference_.order_count());
         }
 
+        if (engine_.best_bid() != reference_.best_bid()) {
+            return field("best_bid", engine_.best_bid().value_or(-1), reference_.best_bid().value_or(-1));
+        }
+        if (engine_.best_ask() != reference_.best_ask()) {
+            return field("best_ask", engine_.best_ask().value_or(-1), reference_.best_ask().value_or(-1));
+        }
+
         const auto engine_order = engine_.get_order(touched_order_id);
         const auto reference_order = reference_.get_order(touched_order_id);
         if (engine_order.has_value() != reference_order.has_value()) {
