@@ -466,7 +466,7 @@ export class Account {
       return;
     }
     this.shown.chart = key;
-    const [line, area, zero] = svg.querySelectorAll('path');
+    const [line, area, zero] = ['.pnl-line', '.pnl-area', '.pnl-zero'].map((selector) => svg.querySelector(selector));
     if (values.length < 2) {
       line.setAttribute('d', '');
       area.setAttribute('d', '');

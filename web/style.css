@@ -1745,6 +1745,7 @@ input.inline {
 }
 
 .pnl-zero {
+  fill: none;
   stroke: var(--border-strong);
   stroke-dasharray: 2 3;
   vector-effect: non-scaling-stroke;
