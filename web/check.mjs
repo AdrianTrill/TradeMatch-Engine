@@ -67,12 +67,28 @@ for (let step = 0; step < 10_000 && !auction; step += 1) {  // until the next ca
   market.step(1);
   auction = JSON.parse(market.snapshot(0, 1, Infinity)).auction;
 }
-if (watched === view.symbols.join() && view.watch.every((summary) => summary.spark.length > 0 && summary.volume > 0 &&
-    summary.high >= summary.low) && auction && auction.price > 0 && auction.matched > 0) {
-  console.log(`[PASS] market watch and auction: ${watched}; indicative ${auction.matched} @ ${auction.price}`);
+
+// The tape: prints in order of their IDs, one per continuous trade, and that auction's uncross as a single print of
+// all its fills, as large as the cross.
+let after = JSON.parse(market.snapshot(0, 1, Infinity));
+const crossesBefore = after.crosses.length;
+for (let step = 0; step < 1_000 && after.crosses.length === crossesBefore; step += 1) {
+  market.step(1);
+  after = JSON.parse(market.snapshot(0, 1, Infinity));
+}
+const prints = after.trades;
+const cross = after.crosses.at(-1);
+const crossPrint = prints.find((print) => print[4] === 'X' && print[1] === cross[0]);
+const tapeOk = prints.every((print, index) => index === 0 || print[0] > prints[index - 1][0]) &&
+  prints.filter((print) => print[4] !== 'X').every((print) => print[5] === 1) &&
+  crossPrint !== undefined && crossPrint[3] === cross[2] && crossPrint[2] === cross[1] && crossPrint[5] > 1;
+if (tapeOk && watched === view.symbols.join() && view.watch.every((summary) => summary.spark.length > 0 &&
+    summary.volume > 0 && summary.high >= summary.low) && auction && auction.price > 0 && auction.matched > 0) {
+  console.log(`[PASS] tape, market watch, and auction: ${watched}; indicative ${auction.matched} @ ${auction.price}; ` +
+    `uncross printed as one trade of ${crossPrint[3]} from ${crossPrint[5]} fills`);
 } else {
   failures += 1;
-  console.log(`[FAIL] market watch and auction: ${JSON.stringify(view.watch).slice(0, 200)} ${JSON.stringify(auction)}`);
+  console.log(`[FAIL] tape, market watch, and auction: ${JSON.stringify(auction)} ${JSON.stringify(prints.slice(-3))}`);
 }
 market.delete();
 

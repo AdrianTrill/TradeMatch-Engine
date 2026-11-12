@@ -1005,11 +1005,18 @@ button {
   padding: 0 14px;
 }
 
-.level:hover {
+.level:hover,
+.level.swept {
   background: var(--hover);
 }
 
-.level .bar {
+.level:has(.px:not(:empty)) {
+  cursor: pointer;
+}
+
+/* Each level shades its share of the depth shown, and over that, its own size. */
+.level .bar,
+.level .depth-bar {
   position: absolute;
   top: 1px;
   right: 0;
@@ -1019,12 +1026,37 @@ button {
   transition: width 0.2s var(--ease);
 }
 
-.level.ask .bar {
+.level .depth-bar {
+  opacity: 0.32;
+}
+
+.level.ask .bar,
+.level.ask .depth-bar {
   background: var(--sell-soft);
 }
 
-.level.bid .bar {
+.level.bid .bar,
+.level.bid .depth-bar {
   background: var(--buy-soft);
+}
+
+.level .flash {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.level .flash.shrank {
+  background: var(--hover);
+}
+
+.level.ask .flash.grew {
+  background: var(--sell-strong);
+}
+
+.level.bid .flash.grew {
+  background: var(--buy-strong);
 }
 
 .level span {
@@ -1061,9 +1093,27 @@ button {
 }
 
 .mid-price {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 17px;
   font-weight: 700;
   letter-spacing: -0.01em;
+}
+
+.mid-price .tick {
+  display: none;
+  width: 15px;
+  height: 15px;
+}
+
+.mid-price.up .tick,
+.mid-price.down .tick {
+  display: block;
+}
+
+.mid-price.down .tick {
+  transform: rotate(180deg);
 }
 
 .mid-price.up {
@@ -1084,6 +1134,94 @@ button {
   font-size: 12px;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+.imbalance {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px 2px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.imbalance-label.buy {
+  color: var(--buy);
+}
+
+.imbalance-label.sell {
+  color: var(--sell);
+}
+
+.imbalance-label b {
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.imbalance-bar {
+  position: relative;
+  flex: 1;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--sell);
+}
+
+.imbalance-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 50%;
+  border-right: 2px solid var(--surface);
+  background: var(--buy);
+  transition: width 0.3s var(--ease);
+}
+
+.head-end {
+  margin-left: auto;
+}
+
+.speed-button.compact {
+  height: 26px;
+  padding: 0 6px 0 9px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.book-tooltip {
+  position: fixed;
+  z-index: 40;
+  min-width: 190px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  box-shadow: 0 18px 40px -14px rgba(0, 0, 0, 0.75);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.tooltip-title {
+  margin-bottom: 6px;
+  font-weight: 650;
+}
+
+.book-tooltip dl {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 3px 18px;
+  margin: 0;
+}
+
+.book-tooltip dt {
+  color: var(--muted);
+}
+
+.book-tooltip dd {
+  margin: 0;
+  font-weight: 600;
+  text-align: right;
 }
 
 /* Trades */
@@ -1111,10 +1249,15 @@ button {
 }
 
 #tape li {
+  position: relative;
   display: grid;
   align-items: center;
   height: var(--row);
   padding: 0 14px;
+}
+
+#tape li span {
+  position: relative;
 }
 
 #tape li span:not(:first-child) {
@@ -1125,16 +1268,71 @@ button {
   color: var(--muted);
 }
 
-.B {
+.print.B .px {
   color: var(--buy);
 }
 
-.S {
+.print.S .px {
   color: var(--sell);
 }
 
-.X {
+.print.X {
+  background: var(--auction-soft);
   color: var(--auction);
+  font-weight: 650;
+}
+
+.cross-tag {
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* A large print: bold, over a bar sized to the trade. */
+.print.big {
+  font-weight: 700;
+}
+
+.print.big::before {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  bottom: 1px;
+  width: calc(var(--share) * 100%);
+  border-radius: 3px 0 0 3px;
+  content: "";
+}
+
+.print.big.B::before {
+  background: var(--buy-soft);
+}
+
+.print.big.S::before {
+  background: var(--sell-soft);
+}
+
+/* A new print arrives with a brief tint, short enough to stay readable on a busy tape. */
+.print.new {
+  animation: print-in 0.35s ease-out;
+}
+
+.print.B.new {
+  --flash: var(--buy-soft);
+}
+
+.print.S.new {
+  --flash: var(--sell-soft);
+}
+
+.print.X.new {
+  --flash: var(--auction-soft);
+}
+
+@keyframes print-in {
+  from {
+    background: var(--flash);
+  }
 }
 
 /* Status bar ----------------------------------------------------------------------------------------------------- */

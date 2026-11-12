@@ -1,7 +1,7 @@
 // The playground: drives the engine's WebAssembly build and draws what it does, a simulated market trading through
 // auctions and continuous sessions, and the engine's command line.
 import createTradeMatch from '../tradematch.js';
-import { BookView } from './book.js';
+import { BookView, GROUPINGS } from './book.js';
 import { PriceChart, TIMEFRAMES } from './chart.js';
 import { DepthChart } from './depth.js';
 import { $, element, text } from './dom.js';
@@ -68,7 +68,7 @@ const quote = new Quote($('#quote').parentElement);
 const session = new Session($('#session'));
 const depth = new DepthChart($('#depth'));
 const book = new BookView($('#book'));
-const tape = new TapeView($('#tape'));
+const tape = new TapeView($('#tape'), $('#trade-rate'));
 
 // A market for the seed, fast-forwarded by `skip` simulated seconds. The URL keeps the seed, so a market can be shared;
 // a first visit starts a minute into the first day, so the chart already has candles.
@@ -78,6 +78,8 @@ function newMarket(seed, skip = 0) {
   market.instance.step(Math.round(skip / STEP_SECONDS));
   market.seed = seed;
   quote.reset();
+  book.reset();
+  tape.reset();
   market.histories = [];
   const phases = JSON.parse(market.instance.config()).phases.map(([, length]) => length);
   market.config = {
@@ -122,6 +124,8 @@ function selectSymbol(index) {
   market.symbol = index;
   quote.reset();
   chart.reset();
+  book.reset();
+  tape.reset();
 }
 
 function history(index) {
@@ -182,7 +186,7 @@ function frame(now) {
       }
     }
     const candles = history(market.symbol);
-    const view = JSON.parse(market.instance.snapshot(market.symbol, Math.max(book.levels, 24), candles.since));
+    const view = JSON.parse(market.instance.snapshot(market.symbol, book.depth, candles.since));
     candles.merge(view.candles);
     render(view, candles);
   }
@@ -204,42 +208,56 @@ const speedName = (speed) => `${speed === 0.5 ? '½' : speed}×`;
 function setSpeed(speed) {
   market.speed = speed;
   text($('#speed-label'), speedName(speed));
-  for (const item of $('#speed').children) {
-    item.setAttribute('aria-checked', String(Number(item.dataset.speed) === speed));
+  check($('#speed'), speed);
+}
+
+// A drop-down menu of choices under a button, closed by a choice, a click elsewhere, or Escape.
+function dropdown(button, menu, choices, choose) {
+  const toggle = (open) => {
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', String(open));
+  };
+  for (const [value, label, note] of choices) {
+    const item = element('button', 'menu-item', `<span>${label}</span><span class="menu-note">${note}</span>`);
+    item.dataset.value = value;
+    item.setAttribute('role', 'menuitemradio');
+    item.addEventListener('click', () => {
+      choose(value);
+      toggle(false);
+    });
+    menu.append(item);
   }
-}
-
-function toggleSpeedMenu(open) {
-  $('#speed').hidden = !open;
-  $('#speed-button').setAttribute('aria-expanded', String(open));
-}
-
-for (const speed of SPEEDS) {
-  const item = element('button', 'menu-item');
-  item.innerHTML = `<span>${speedName(speed)}</span><span class="menu-note">${
-    speed === 1 ? 'real time' : `${speed} s a second`}</span>`;
-  item.dataset.speed = speed;
-  item.setAttribute('role', 'menuitemradio');
-  item.addEventListener('click', () => {
-    setSpeed(speed);
-    toggleSpeedMenu(false);
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggle(menu.hidden);
   });
-  $('#speed').append(item);
+  document.addEventListener('click', (event) => {
+    if (!menu.hidden && !menu.contains(event.target)) {
+      toggle(false);
+    }
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      toggle(false);
+    }
+  });
 }
-$('#speed-button').addEventListener('click', (event) => {
-  event.stopPropagation();
-  toggleSpeedMenu($('#speed').hidden);
-});
-document.addEventListener('click', (event) => {
-  if (!$('#speed').hidden && !$('#speed').contains(event.target)) {
-    toggleSpeedMenu(false);
+
+function check(menu, value) {
+  for (const item of menu.children) {
+    item.setAttribute('aria-checked', String(Number(item.dataset.value) === value));
   }
-});
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') {
-    toggleSpeedMenu(false);
-  }
-});
+}
+
+dropdown($('#speed-button'), $('#speed'),
+  SPEEDS.map((speed) => [speed, speedName(speed), speed === 1 ? 'real time' : `${speed} s a second`]), setSpeed);
+dropdown($('#grouping-button'), $('#grouping'),
+  GROUPINGS.map((ticks) => [ticks, price(ticks), ticks === 1 ? 'every price' : `${ticks} ticks a row`]), (ticks) => {
+    book.setGrouping(ticks);
+    text($('#grouping-label'), price(ticks));
+    check($('#grouping'), ticks);
+  });
+check($('#grouping'), 1);
 
 for (const seconds of TIMEFRAMES) {
   const button = element('button');

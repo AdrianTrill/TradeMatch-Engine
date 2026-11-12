@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <span>
@@ -41,6 +42,8 @@ void levels(std::ostringstream& json, const std::vector<tradematch::DepthLevel>&
 constexpr tradematch::Timestamp kSecond = 1'000'000'000;
 constexpr std::size_t kMaxCandles = 20'000;  // one-second candles sent at most, the newest
 constexpr std::size_t kSparkline = 60;       // closing prices of the last minute's candles, for the market watch
+constexpr std::size_t kTape = 120;           // prints kept on each symbol's tape
+constexpr std::size_t kTapeSent = 60;        // the newest of them sent with each snapshot
 
 void number_or_null(std::ostringstream& json, std::optional<double> value) {
     if (value) {
@@ -51,8 +54,9 @@ void number_or_null(std::ostringstream& json, std::optional<double> value) {
 }
 
 // The agent-based market of the terminal UI: three stocks trading through opening auctions, continuous trading, and
-// closing auctions, day after day. It listens to the exchange's order-level events to keep each day's high, low,
-// volume, and VWAP, and every auction cross, and samples each stock's fair value and VWAP once a simulated second.
+// closing auctions, day after day. It listens to the exchange's order-level events to keep each stock's tape, where an
+// auction's uncross is one print, the day's high, low, volume, and VWAP, and every auction cross, and samples each
+// stock's fair value and VWAP once a simulated second.
 class LiveMarket final : public tradematch::OrderFeedListener {
 public:
     explicit LiveMarket(unsigned seed) {
@@ -118,6 +122,7 @@ public:
                 }
                 instrument.crosses.back().volume += trade.quantity;
             }
+            print(instrument, trade, now);
         }
     }
 
@@ -177,16 +182,15 @@ public:
         json << ",\"asks\":";
         levels(json, feed.depth(symbol).levels(tradematch::Side::Sell, rows));
 
-        // The newest trades last, as [time, price, quantity, aggressor]; auction trades have no aggressor.
-        const auto& tape = feed.recent_trades(symbol);
+        // The newest prints last, as [id, time, price, quantity, aggressor, fills]: 'B' or 'S' for the side that took
+        // liquidity, or 'X' for an auction's uncross, one print however many orders it filled.
+        const auto& tape = instrument.tape;
         json << ",\"trades\":[";
-        const std::size_t first_trade = tape.size() > 40 ? tape.size() - 40 : 0;
-        for (std::size_t position = first_trade; position < tape.size(); ++position) {
-            const tradematch::TapeEntry& entry = tape[position];
-            const char aggressor =
-                entry.trade.auction ? 'X' : (entry.trade.aggressor_side == tradematch::Side::Buy ? 'B' : 'S');
-            json << (position == first_trade ? "" : ",") << '[' << entry.timestamp << ',' << entry.trade.price << ','
-                 << entry.trade.quantity << ",\"" << aggressor << "\"]";
+        const std::size_t first_print = tape.size() > kTapeSent ? tape.size() - kTapeSent : 0;
+        for (std::size_t position = first_print; position < tape.size(); ++position) {
+            const Print& entry = tape[position];
+            json << (position == first_print ? "" : ",") << '[' << entry.id << ',' << entry.time << ',' << entry.price
+                 << ',' << entry.quantity << ",\"" << entry.aggressor << "\"," << entry.fills << ']';
         }
 
         // Every auction cross, as [time, price, volume].
@@ -261,6 +265,14 @@ private:
         tradematch::Price price{};
         tradematch::Volume volume{};
     };
+    struct Print {
+        std::uint64_t id{};
+        tradematch::Timestamp time{};
+        tradematch::Price price{};
+        tradematch::Volume quantity{};
+        char aggressor{};
+        std::uint32_t fills{};
+    };
     struct Instrument {
         double day_value{0.0};
         tradematch::Volume day_volume{0};
@@ -268,7 +280,23 @@ private:
         std::optional<tradematch::Price> day_low;
         std::vector<Sample> samples;  // by second
         std::vector<Cross> crosses;
+        std::deque<Print> tape;
     };
+
+    // Adds a trade to its symbol's tape. The fills of one uncross, all at one time and price, become one print.
+    void print(Instrument& instrument, const tradematch::Trade& trade, tradematch::Timestamp now) {
+        if (trade.auction && !instrument.tape.empty() && instrument.tape.back().aggressor == 'X' &&
+            instrument.tape.back().time == now && instrument.tape.back().price == trade.price) {
+            instrument.tape.back().quantity += trade.quantity;
+            ++instrument.tape.back().fills;
+            return;
+        }
+        const char aggressor = trade.auction ? 'X' : (trade.aggressor_side == tradematch::Side::Buy ? 'B' : 'S');
+        instrument.tape.push_back(Print{++prints_, now, trade.price, trade.quantity, aggressor, 1});
+        if (instrument.tape.size() > kTape) {
+            instrument.tape.pop_front();
+        }
+    }
 
     // The day's volume-weighted average price so far, in ticks to two decimals, or nothing before its first trade.
     std::optional<double> vwap(std::size_t index) const {
@@ -285,6 +313,7 @@ private:
     std::vector<std::size_t> index_by_symbol_;
     int day_{0};
     tradematch::Timestamp seconds_sampled_{0};
+    std::uint64_t prints_{0};
 };
 
 // The interactive command line: one interpreter that keeps its state from command to command.

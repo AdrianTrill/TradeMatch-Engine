@@ -1,6 +1,8 @@
-// The depth chart: each side's cumulative size outward from the best price, as filled steps around the mid price.
+// The depth chart: each side's cumulative size outward from the best price, as filled steps around the mid price. The
+// pointer reads out the size and value up to its price: one side's in continuous trading, and during a call auction
+// both curves, whose crossing is the uncross.
 import { crisp, font, niceStep, surface } from './canvas.js';
-import { compact, price } from './format.js';
+import { compact, grouped, price } from './format.js';
 import { palette } from './palette.js';
 
 const AXIS = 22;  // height of the price axis along the bottom
@@ -8,6 +10,14 @@ const AXIS = 22;  // height of the price axis along the bottom
 export class DepthChart {
   constructor(canvas) {
     this.canvas = canvas;
+    this.hover = null;
+    canvas.addEventListener('pointermove', (event) => {
+      const box = canvas.getBoundingClientRect();
+      this.hover = { x: event.clientX - box.left, y: event.clientY - box.top };
+    });
+    canvas.addEventListener('pointerleave', () => {
+      this.hover = null;
+    });
   }
 
   draw(view) {
@@ -63,6 +73,79 @@ export class DepthChart {
       context.fillText(price(Math.round(value)), x(value), height - 7);
     }
     context.textAlign = 'left';
+
+    if (this.hover && this.hover.y < bottom) {
+      this.readout(context, view, mid, reach, width, bottom, y);
+    }
+  }
+
+  readout(context, view, mid, reach, width, bottom, y) {
+    const { bids, asks } = view;
+    const at = Math.round(mid - reach + (this.hover.x / width) * 2 * reach);
+    const buyers = bids.filter((level) => level[0] >= at);
+    const sellers = asks.filter((level) => level[0] <= at);
+    const shares = (levels) => levels.reduce((sum, level) => sum + level[1], 0);
+    const value = (levels) => levels.reduce((sum, level) => sum + level[0] * level[1], 0);
+    const lines = [];
+    const dots = [];
+    if (view.auction) {
+      lines.push(['Buyers at or above', grouped(shares(buyers))], ['Sellers at or below', grouped(shares(sellers))],
+        ['Would trade here', grouped(Math.min(shares(buyers), shares(sellers)))]);
+      dots.push([shares(buyers), palette.buy], [shares(sellers), palette.sell]);
+    } else {
+      const side = at <= mid ? buyers : sellers;
+      if (side.length === 0) {
+        return;
+      }
+      lines.push([at <= mid ? 'Bids at or above' : 'Asks at or below', grouped(shares(side))],
+        ['Value', `$${compact(value(side) / 100)}`]);
+      dots.push([shares(side), at <= mid ? palette.buy : palette.sell]);
+    }
+
+    context.strokeStyle = palette.crosshair;
+    context.setLineDash([4, 4]);
+    context.beginPath();
+    context.moveTo(crisp(this.hover.x), 16);
+    context.lineTo(crisp(this.hover.x), bottom);
+    context.stroke();
+    context.setLineDash([]);
+    for (const [size, color] of dots) {
+      context.fillStyle = color;
+      context.strokeStyle = palette.surface;
+      context.lineWidth = 2;
+      context.beginPath();
+      context.arc(this.hover.x, y(size), 4, 0, Math.PI * 2);
+      context.stroke();
+      context.fill();
+      context.lineWidth = 1;
+    }
+
+    // The readout, beside the pointer on whichever side has room.
+    context.font = font(11, 600);
+    const title = price(at);
+    const labelWidth = Math.max(...lines.map(([label]) => context.measureText(label).width));
+    const valueWidth = Math.max(...lines.map(([, figure]) => context.measureText(figure).width));
+    const boxWidth = Math.max(context.measureText(title).width, labelWidth + valueWidth + 16) + 20;
+    const boxHeight = 30 + lines.length * 17;
+    const left = this.hover.x + 14 + boxWidth < width ? this.hover.x + 14 : this.hover.x - 14 - boxWidth;
+    const top = Math.max(18, Math.min(bottom - boxHeight - 4, this.hover.y - boxHeight / 2));
+    context.fillStyle = palette.surfaceRaised;
+    context.strokeStyle = palette.borderStrong;
+    context.beginPath();
+    context.roundRect(left, top, boxWidth, boxHeight, 8);
+    context.fill();
+    context.stroke();
+    context.fillStyle = palette.text;
+    context.fillText(title, left + 10, top + 18);
+    lines.forEach(([label, figure], index) => {
+      const line = top + 36 + index * 17;
+      context.font = font(11, 500);
+      context.fillStyle = palette.muted;
+      context.fillText(label, left + 10, line);
+      context.font = font(11, 600);
+      context.fillStyle = palette.text;
+      context.fillText(figure, left + boxWidth - 10 - context.measureText(figure).width, line);
+    });
   }
 
   // One side as a filled staircase from the best price out to the edge of the chart.

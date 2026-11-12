@@ -152,6 +152,23 @@ await check('the chart zooms, scrolls back, returns to live, and changes timefra
   await page.click('#timeframes button:nth-child(1)');
 });
 
+await check('the order book groups prices and reads out a sweep', async () => {
+  await page.click('#grouping-button');
+  await page.click('#grouping .menu-item:nth-child(3)');
+  await sleep(150);
+  const prices = await page.$$eval('.level .px', (cells) => cells.map((cell) => cell.textContent).filter(Boolean));
+  expect(prices.length > 0 && prices.every((text) => Math.round(Number(text) * 100) % 10 === 0),
+    `grouped prices: ${prices.slice(0, 4)}`);
+  await page.hover('.level.bid:nth-child(3)');
+  await sleep(150);
+  const tooltip = await page.$eval('.book-tooltip', (node) => (node.hidden ? '' : node.textContent));
+  expect(tooltip.includes('Selling down to') && tooltip.includes('Average price'), `tooltip: ${tooltip}`);
+  await page.mouse.move(5, 5);
+  await page.click('#grouping-button');
+  await page.click('#grouping .menu-item:nth-child(1)');
+  return `${prices.length} rows of 0.10`;
+});
+
 await check('the market runs, and pausing stops it', async () => {
   const before = await read('#clock');
   await sleep(500);
