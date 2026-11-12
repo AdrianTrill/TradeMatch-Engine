@@ -130,6 +130,28 @@ await check('the charts draw', async () => {
   return `${painted.join(' and ')} pixels painted`;
 });
 
+await check('the chart zooms, scrolls back, returns to live, and changes timeframe', async () => {
+  const box = await (await page.$('#candles')).boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  for (let notch = 0; notch < 4; notch += 1) {
+    await page.mouse.wheel({ deltaY: 200 });
+  }
+  await page.mouse.move(box.x + 100, box.y + 150);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 400, box.y + 150, { steps: 6 });
+  await page.mouse.up();
+  await sleep(100);
+  expect(await page.$eval('#live', (button) => !button.hidden), 'scrolling back should offer a way back to live');
+  await page.click('#live');
+  await sleep(100);
+  expect(await page.$eval('#live', (button) => button.hidden), 'the live button should take the chart back');
+  await page.click('#timeframes button:nth-child(3)');
+  await sleep(150);
+  const timeframe = await read('[data-field="timeframe"]');
+  expect(timeframe === '15s', `the legend shows ${timeframe}`);
+  await page.click('#timeframes button:nth-child(1)');
+});
+
 await check('the market runs, and pausing stops it', async () => {
   const before = await read('#clock');
   await sleep(500);

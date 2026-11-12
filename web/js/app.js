@@ -2,17 +2,17 @@
 // auctions and continuous sessions, and the engine's command line.
 import createTradeMatch from '../tradematch.js';
 import { BookView } from './book.js';
-import { PriceChart } from './chart.js';
+import { PriceChart, TIMEFRAMES } from './chart.js';
 import { DepthChart } from './depth.js';
 import { $, element, text } from './dom.js';
 import { clock, grouped, price } from './format.js';
+import { CandleHistory } from './history.js';
 import { readPalette } from './palette.js';
 import { TapeView } from './tape.js';
 import { startTerminal } from './terminal.js';
 import { toast } from './toast.js';
 
 const STEP_SECONDS = 0.01;  // simulated time per simulator step
-const DAY_SECONDS = 100;  // the simulator's day: a 4 s opening auction, 90 s of trading, a 4 s close, 2 s closed
 const SPEEDS = [0.5, 1, 2, 5, 10, 25];  // simulated seconds per second
 const MAX_STEPS = 2_500;  // per frame, so a long pause in the browser can't stall the page
 
@@ -57,9 +57,11 @@ const market = {
   lastFrame: performance.now(),
   symbols: [],
   lastPrice: null,
+  config: null,  // the simulated day's shape: phase lengths in nanoseconds
+  histories: [],  // each symbol's candles
 };
 
-const chart = new PriceChart($('#candles'));
+const chart = new PriceChart($('#candles'), $('#legend'), $('#live'));
 const depth = new DepthChart($('#depth'));
 const book = new BookView($('#book'));
 const tape = new TapeView($('#tape'));
@@ -72,6 +74,16 @@ function newMarket(seed, skip = 0) {
   market.instance.step(Math.round(skip / STEP_SECONDS));
   market.seed = seed;
   market.lastPrice = null;
+  market.histories = [];
+  const phases = JSON.parse(market.instance.config()).phases.map(([, length]) => length);
+  market.config = {
+    opening: phases[0],
+    continuous: phases[1],
+    closing: phases[2],
+    closed: phases[3],
+    dayLength: phases.reduce((sum, length) => sum + length, 0),
+  };
+  chart.goLive();
   text($('#seed'), seed);
   const url = new URL(window.location.href);
   url.searchParams.set('seed', seed);
@@ -87,11 +99,11 @@ function measureSpeed() {
   setTimeout(() => {
     const bench = new tradematch.LiveMarket(7);
     bench.step(1_000);
-    const before = JSON.parse(bench.snapshot(0, 1)).requests;
+    const before = JSON.parse(bench.snapshot(0, 1, Infinity)).requests;
     const started = performance.now();
     bench.step(20_000);
     const elapsed = performance.now() - started;
-    const requests = JSON.parse(bench.snapshot(0, 1)).requests - before;
+    const requests = JSON.parse(bench.snapshot(0, 1, Infinity)).requests - before;
     bench.delete();
     const rate = requests / (elapsed / 1000);
     if (!Number.isFinite(rate)) {
@@ -123,9 +135,15 @@ function renderSymbols(view) {
 function selectSymbol(index) {
   market.symbol = index;
   market.lastPrice = null;
+  chart.reset();
 }
 
-function render(view) {
+function history(index) {
+  market.histories[index] ??= new CandleHistory();
+  return market.histories[index];
+}
+
+function render(view, candles) {
   renderSymbols(view);
   const last = $('#last');
   if (view.last !== null && view.last !== market.lastPrice) {
@@ -138,17 +156,17 @@ function render(view) {
   const phase = $('#phase');
   text(phase, view.phase);
   phase.className = `phase${view.phase.includes('AUCTION') ? ' auction' : ''}${view.phase === 'CLOSED' ? ' closed' : ''}`;
-  text($('#clock'), `Day ${view.day} · ${clock(view.time, DAY_SECONDS)}`);
+  text($('#clock'), `Day ${view.day} · ${clock(view.time, market.config.dayLength / 1e9)}`);
 
   text($('#requests'), grouped(view.requests));
   text($('#trades'), grouped(view.trade_count));
   text($('#auctions'), grouped(view.auctions));
   text($('#resting'), grouped(view.orders));
 
-  chart.draw(view);
+  chart.draw({ view, history: candles, config: market.config });
   depth.draw(view);
   book.update(view);
-  tape.update(view, DAY_SECONDS);
+  tape.update(view, market.config.dayLength / 1e9);
 }
 
 function frame(now) {
@@ -163,7 +181,10 @@ function frame(now) {
         market.instance.step(steps);
       }
     }
-    render(JSON.parse(market.instance.snapshot(market.symbol, Math.max(book.levels, 24))));
+    const candles = history(market.symbol);
+    const view = JSON.parse(market.instance.snapshot(market.symbol, Math.max(book.levels, 24), candles.since));
+    candles.merge(view.candles);
+    render(view, candles);
   }
   requestAnimationFrame(frame);
 }
@@ -195,11 +216,26 @@ for (const speed of SPEEDS) {
   $('#speed').append(button);
 }
 
+for (const seconds of TIMEFRAMES) {
+  const button = element('button');
+  button.textContent = seconds === 60 ? '1m' : `${seconds}s`;
+  button.setAttribute('role', 'radio');
+  button.setAttribute('aria-checked', String(seconds === 1));
+  button.title = `${seconds === 60 ? 'One-minute' : `${seconds}-second`} candles`;
+  button.addEventListener('click', () => {
+    chart.setTimeframe(seconds);
+    for (const other of $('#timeframes').children) {
+      other.setAttribute('aria-checked', String(other === button));
+    }
+  });
+  $('#timeframes').append(button);
+}
+
 $('#play').addEventListener('click', () => setRunning(!market.running));
 $('#reseed').addEventListener('click', () => newMarket(Math.floor(Math.random() * 1_000_000)));
 $('#share').addEventListener('click', async () => {
   const url = new URL(window.location.href);
-  const view = JSON.parse(market.instance.snapshot(0, 1));
+  const view = JSON.parse(market.instance.snapshot(0, 1, Infinity));
   url.searchParams.set('seed', market.seed);
   url.searchParams.set('skip', Math.floor(view.time / 1e9));
   try {

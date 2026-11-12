@@ -35,7 +35,9 @@ Prices are represented as integer ticks rather than floating-point values. In th
 
 ## Try It in Your Browser
 
-The engine also compiles to WebAssembly. **[Open the playground](https://adriantrill.github.io/TradeMatch-Engine/)** to watch the market simulator trade live, with its order book, one-second candles, depth, and trades drawn as it goes, or switch to the command line and send orders yourself, with the golden scenarios a click away. It all runs in the page, with no server: there the simulator, agents included, handles about 3 million requests a second. `?seed=N` in the address picks the market, so a market can be shared, and `?skip=S` fast-forwards it by S simulated seconds.
+The engine also compiles to WebAssembly. **[Open the playground](https://adriantrill.github.io/TradeMatch-Engine/)** to watch the market simulator trade live, with its order book, candles, depth, and trades drawn as it goes, or switch to the command line and send orders yourself, with the golden scenarios a click away. It all runs in the page, with no server: there the simulator, agents included, handles about 3 million requests a second. `?seed=N` in the address picks the market, and the copy-link button shares a market at the moment you're watching (`?skip=S` fast-forwards by S simulated seconds; a first visit starts a minute in).
+
+The chart works like a trading terminal's. Candles of 1 second to 1 minute sit on a time axis, where each day's opening and closing auctions and the close are shaded and every auction cross is marked with its volume. The hidden fair value the market makers quote around is drawn through them, with the day's VWAP. A crosshair reads any candle, the wheel zooms, and dragging looks back in time.
 
 <p align="center">
   <img src="docs/assets/playground.png" width="857" alt="The browser playground: the order book with depth bars, one-second candles around the simulator's hidden fair value, a cumulative depth chart, and the trade tape, during continuous trading">

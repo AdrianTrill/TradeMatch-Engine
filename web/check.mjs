@@ -31,15 +31,35 @@ for (const name of readdirSync(scenarioDir).filter((file) => file.endsWith('.tm'
 }
 
 const market = new tradematch.LiveMarket(42);
-market.step(12_000);  // two simulated minutes: an opening auction, continuous trading, and a close
-const view = JSON.parse(market.snapshot(0, 10));
-market.delete();
+market.step(12_000);  // two simulated minutes: two opening auctions, continuous trading, and a close
+const view = JSON.parse(market.snapshot(0, 10, -1));
+const config = JSON.parse(market.config());
 if (view.trade_count > 0 && view.auctions > 0 && view.candles.length > 0) {
   console.log(`[PASS] live market: ${view.requests} requests, ${view.trade_count} trades, ${view.auctions} auctions`);
 } else {
   failures += 1;
   console.log(`[FAIL] live market: ${JSON.stringify(view).slice(0, 200)}`);
 }
+
+// The chart's data: candles sent from a given start on, each with the fair value and the day's VWAP as of its end, and
+// the auction crosses at the scheduled times.
+const dayLength = config.phases.reduce((sum, [, length]) => sum + length, 0);
+const [opening, continuous, closing] = config.phases.map(([, length]) => length);
+const newest = view.candles.at(-1)[0];
+const since = JSON.parse(market.snapshot(0, 1, newest)).candles;
+const crossTimes = view.crosses.map(([time]) => time % dayLength);
+const sampled = view.candles.slice(0, -1);
+if (dayLength === 100e9 && since.length === 1 && since[0][0] === newest &&
+    sampled.every((candle) => candle.length === 8 && candle[6] > 0) &&
+    sampled.filter((candle) => candle[0] % dayLength > opening).every((candle) => candle[7] > 0) &&
+    view.crosses.length >= 3 && view.crosses.every(([, price, volume]) => price > 0 && volume > 0) &&
+    crossTimes.every((time) => time === opening || time === opening + continuous + closing)) {
+  console.log(`[PASS] chart data: ${view.candles.length} candles, crosses at ${view.crosses.map(([time]) => time / 1e9)} s`);
+} else {
+  failures += 1;
+  console.log(`[FAIL] chart data: since=${JSON.stringify(since)} crosses=${JSON.stringify(view.crosses)}`);
+}
+market.delete();
 
 const terminal = new tradematch.Terminal();
 const reply = terminal.run('add ACME') + terminal.run('buy ACME 10 @ 100.00');

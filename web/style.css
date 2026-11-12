@@ -574,6 +574,147 @@ button {
   height: 100%;
 }
 
+/* Price chart */
+
+.segmented.compact button {
+  height: 22px;
+  min-width: 30px;
+  padding: 0 7px;
+  font-size: 11.5px;
+}
+
+.chart-hint {
+  margin-left: auto;
+}
+
+.chart-body canvas {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.chart-body canvas.dragging {
+  cursor: grabbing;
+}
+
+.chart-legend {
+  position: absolute;
+  top: 9px;
+  right: 80px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.legend-symbol {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.legend-chip {
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--hover);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ohlc i {
+  margin-right: 4px;
+  color: var(--muted);
+  font-style: normal;
+}
+
+.ohlc span {
+  margin-right: 9px;
+  color: var(--text);
+}
+
+.legend-change.up {
+  color: var(--buy);
+}
+
+.legend-change.down {
+  color: var(--sell);
+}
+
+.series {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 85%, transparent);
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  pointer-events: auto;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+
+.series:hover {
+  border-color: var(--border-strong);
+}
+
+.series .swatch {
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.series.fair .swatch {
+  background: repeating-linear-gradient(90deg, var(--fair) 0 4px, transparent 4px 6px);
+}
+
+.series.vwap .swatch {
+  background: var(--vwap);
+}
+
+.series b {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.series[aria-pressed="false"] {
+  opacity: 0.45;
+}
+
+.series[aria-pressed="false"] b {
+  visibility: hidden;
+}
+
+.chart-live {
+  position: absolute;
+  right: 80px;
+  bottom: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  backdrop-filter: blur(6px);
+}
+
 .columns {
   display: grid;
   flex: none;
