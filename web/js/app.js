@@ -10,8 +10,9 @@ import { Quote, Session, Tickers } from './header.js';
 import { CandleHistory } from './history.js';
 import { readPalette } from './palette.js';
 import { TapeView } from './tape.js';
+import { startShortcuts } from './shortcuts.js';
 import { startTerminal } from './terminal.js';
-import { startTheme } from './theme.js';
+import { startTheme, toggleTheme } from './theme.js';
 import { toast } from './toast.js';
 import { Account, Ticket } from './trading.js';
 
@@ -34,18 +35,20 @@ $('#market').hidden = false;
 
 const terminal = startTerminal(tradematch);
 
+function showView(name) {
+  for (const tab of document.querySelectorAll('.view-tab')) {
+    tab.classList.toggle('active', tab.dataset.view === name);
+  }
+  for (const view of document.querySelectorAll('.view')) {
+    view.hidden = view.id !== name;
+  }
+  if (name === 'terminal') {
+    terminal.focus();
+  }
+}
+
 for (const tab of document.querySelectorAll('.view-tab')) {
-  tab.addEventListener('click', () => {
-    for (const other of document.querySelectorAll('.view-tab')) {
-      other.classList.toggle('active', other === tab);
-    }
-    for (const view of document.querySelectorAll('.view')) {
-      view.hidden = view.id !== tab.dataset.view;
-    }
-    if (tab.dataset.view === 'terminal') {
-      terminal.focus();
-    }
-  });
+  tab.addEventListener('click', () => showView(tab.dataset.view));
 }
 
 // The live market --------------------------------------------------------------------------------------------------
@@ -367,11 +370,34 @@ startTheme(() => {
     redraw();
   }
 });
-document.addEventListener('keydown', (event) => {
-  if (event.code === 'Space' && event.target === document.body && !$('#market').hidden) {
-    event.preventDefault();
-    setRunning(!market.running);
+
+const changeSpeed = (direction) =>
+  setSpeed(SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1, SPEEDS.indexOf(market.speed) + direction))]);
+const showSymbol = (index) => () => {
+  if (index < market.symbols.length) {
+    selectSymbol(index);
   }
+};
+startShortcuts({
+  market: {
+    ' ': () => setRunning(!market.running),
+    1: showSymbol(0),
+    2: showSymbol(1),
+    3: showSymbol(2),
+    '-': () => changeSpeed(-1),
+    '_': () => changeSpeed(-1),
+    '+': () => changeSpeed(1),
+    '=': () => changeSpeed(1),
+    b: () => ticket.setSide('BUY'),
+    s: () => ticket.setSide('SELL'),
+    l: () => chart.goLive(),
+  },
+  anywhere: {
+    t: toggleTheme,
+    m: () => showView('market'),
+    c: () => showView('terminal'),
+  },
+  marketShown: () => !$('#market').hidden,
 });
 
 {

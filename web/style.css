@@ -2062,6 +2062,91 @@ input.inline {
   box-shadow: inset 3px 0 0 var(--sell), var(--shadow-pop);
 }
 
+/* The cross-fade between themes. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.2s;
+}
+
+/* Keyboard shortcuts --------------------------------------------------------------------------------------------- */
+
+.shortcuts-link {
+  margin-left: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+}
+
+.shortcuts-link:hover {
+  color: var(--text);
+}
+
+.shortcuts-link kbd {
+  height: 17px;
+  min-width: 17px;
+  font-size: 10px;
+}
+
+.dialog {
+  width: min(420px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+}
+
+.dialog[open] {
+  animation: dialog-in 0.2s var(--ease);
+}
+
+.dialog::backdrop {
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 8px 20px;
+}
+
+.dialog-head h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.shortcut-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 9px 16px;
+  margin: 0;
+  padding: 6px 20px 20px;
+}
+
+.shortcut-list dt {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.shortcut-list dd {
+  align-self: center;
+  margin: 0;
+  color: var(--text-2);
+}
+
 /* Command line --------------------------------------------------------------------------------------------------- */
 
 .view.terminal {
@@ -2747,6 +2832,10 @@ kbd {
 
   .status-item.end {
     margin-left: 0;
+  }
+
+  .shortcuts-link {
+    display: none;
   }
 }
 

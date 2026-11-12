@@ -13,16 +13,16 @@ TradeMatch Engine is a price-time-priority order matching engine in C++20, with 
 Prices are represented as integer ticks rather than floating-point values. In the demo and tests, one tick equals one cent.
 
 <p align="center">
-  <img src="docs/assets/tui.gif" width="857" alt="The TradeMatch terminal UI: a live order book with depth bars, a trade tape, and one-second candles, as an agent-based market moves from the opening call auction into continuous trading">
+  <a href="https://adriantrill.github.io/TradeMatch-Engine/"><img src="docs/assets/playground.gif" width="857" alt="The browser playground: an opening call auction runs out and uncrosses, continuous trading speeds up, a visitor rests a bid picked from the order book and buys 1,000 shares at market, and the command line replays the call auction scenario"></a>
 </p>
-<p align="center"><em>The <a href="#live-market-simulator">live market simulator</a>: trading agents on the engine, from the opening call auction into continuous trading (<code>make tui</code>).</em></p>
+<p align="center"><em>The <a href="https://adriantrill.github.io/TradeMatch-Engine/">browser playground</a>, live on GitHub Pages: an opening auction uncrosses, a visitor trades against the agents, and the command line replays a golden scenario.</em></p>
 
 ## Highlights
 
 | | |
 | --- | --- |
 | **[Matching core](#matching-rules)** | Price-time priority with stops, icebergs, post-only orders, IOC, FOK, and DAY orders, self-trade prevention, and call auctions. No heap allocations per request: about 50 million operations a second, 19 ns on average, and 209 ns at the 99.99th percentile on an Apple M4 ([details](#performance)) |
-| **[Browser playground](#try-it-in-your-browser)** | The simulator and the command line compiled to WebAssembly and [live on GitHub Pages](https://adriantrill.github.io/TradeMatch-Engine/) |
+| **[Browser playground](#try-it-in-your-browser)** | A trading terminal on the simulator, where you can trade against its agents, and the command line, compiled to WebAssembly and [live on GitHub Pages](https://adriantrill.github.io/TradeMatch-Engine/) |
 | **[NASDAQ ITCH 5.0](#nasdaq-itch-50)** | Publishes the books as NASDAQ's binary feed, and rebuilds books from NASDAQ's own files: a full day of NASDAQ BX, 29 million messages, in about two seconds, with no anomalies |
 | **[Python and market microstructure](#python-and-market-microstructure)** | pybind11 bindings for the book, the simulator, and ITCH replay, and a notebook that measures the simulator against a real day of NASDAQ data |
 | **[FIX 4.2 gateway](#fix-gateway)** | Order entry over TCP, with an interactive client and a latency benchmark that measures the loopback floor beneath each round trip |
@@ -35,7 +35,7 @@ Prices are represented as integer ticks rather than floating-point values. In th
 
 ## Try It in Your Browser
 
-The engine also compiles to WebAssembly. **[Open the playground](https://adriantrill.github.io/TradeMatch-Engine/)** to watch the market simulator trade live, with its order book, candles, depth, and trades drawn as it goes, or switch to the command line and send orders yourself, with the golden scenarios a click away. It all runs in the page, with no server: there the simulator, agents included, handles about 3 million requests a second. `?seed=N` in the address picks the market, and the copy-link button shares a market at the moment you're watching (`?skip=S` fast-forwards by S simulated seconds; a first visit starts a minute in). The page comes in dark and light themes, and remembers the one you pick.
+The engine also compiles to WebAssembly. **[Open the playground](https://adriantrill.github.io/TradeMatch-Engine/)** to watch the market simulator trade live, with its order book, candles, depth, and trades drawn as it goes, or switch to the command line and send orders yourself, with the golden scenarios a click away. It all runs in the page, with no server: there the simulator, agents included, handles about 3 million requests a second. `?seed=N` in the address picks the market, and the copy-link button shares a market at the moment you're watching (`?skip=S` fast-forwards by S simulated seconds; a first visit starts a minute in). The page comes in dark and light themes, and remembers the one you pick; press <kbd>?</kbd> for its keyboard shortcuts.
 
 The chart works like a trading terminal's. Candles of 1 second to 1 minute sit on a time axis, where each day's opening and closing auctions and the close are shaded and every auction cross is marked with its volume. The hidden fair value the market makers quote around is drawn through them, with the day's VWAP. A crosshair reads any candle, the wheel zooms, and dragging looks back in time. Above the chart, every stock's ticker shows its day change and its last minute as a sparkline, and a timeline of the trading day counts down to the next phase. While a call auction collects orders, the page shows what its uncross would do at that moment: the price, the shares that would trade, and the imbalance left over, on the chart, in the order book, and in the depth chart, where the buyers' and sellers' curves cross at the uncross price. The order book flashes as its levels change, groups prices into coarser steps, and, on hover, reads out the shares, average price, and value of sweeping the book down to any level; the tape prints each auction's uncross as one trade, however many orders it filled.
 
@@ -44,10 +44,10 @@ The chart works like a trading terminal's. Candles of 1 second to 1 minute sit o
 **The command line** is the engine's own interpreter, `tradematch_cli`, compiled to WebAssembly, and it keeps one session from command to command. Its examples are the golden scenarios: a click replays one as if typed, in a fresh session that stays open to explore. The output is colored by what each line says: order sides, fills, resting orders, rejects and their reasons, trades, and books split into bids and asks. While you type, the line below the prompt shows the command's syntax, and Tab completes commands, options, and the session's symbols.
 
 <p align="center">
-  <img src="docs/assets/playground.png" width="857" alt="The browser playground: the order book with depth bars, one-second candles around the simulator's hidden fair value, a cumulative depth chart, and the trade tape, during continuous trading">
+  <img src="docs/assets/playground.png" width="857" alt="The browser playground in its light theme: one-second candles around the simulator's hidden fair value with a visitor's resting bid and average price on the chart, the order book with depth bars, the order ticket, a cumulative depth chart, the visitor's position, the trade tape, and the P&L card">
 </p>
 
-The [Playground workflow](.github/workflows/playground.yml) builds the page with Emscripten on every push. Before main is deployed to GitHub Pages, every golden scenario runs through the WebAssembly build under Node and must produce, byte for byte, the transcript the native command line produces, and the command line's coloring must give back every character of every transcript. Then the page itself runs in headless Chrome: it must start without a single console error, draw the order book, the tape, and both charts, respond to its controls, trade against the agents, play an example on the command line and complete a command, switch to its light theme and back, and fit a phone's screen. The page is plain HTML, CSS, and JavaScript modules, with no framework and no build step.
+The [Playground workflow](.github/workflows/playground.yml) builds the page with Emscripten on every push. Before main is deployed to GitHub Pages, every golden scenario runs through the WebAssembly build under Node and must produce, byte for byte, the transcript the native command line produces, and the command line's coloring must give back every character of every transcript. Then the page itself runs in headless Chrome: it must start without a single console error, draw the order book, the tape, and both charts, respond to its controls and keyboard shortcuts, trade against the agents, play an example on the command line and complete a command, switch to its light theme and back, and fit a phone's screen. The page is plain HTML, CSS, and JavaScript modules, with no framework and no build step.
 
 ```bash
 # with the Emscripten SDK installed and activated (https://emscripten.org)
@@ -279,6 +279,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── pyproject.toml
 ├── docs/assets/
 │   ├── microstructure.png
+│   ├── playground.gif
 │   ├── playground.png
 │   └── tui.gif
 ├── include/tradematch/
@@ -385,6 +386,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
     │   └── *.js
     ├── package.json
     ├── playground.cpp
+    ├── social.png
     ├── style.css
     └── ui-check.mjs
 ```
@@ -550,6 +552,11 @@ Every simulated day is a full exchange session: an opening call auction, continu
 Orders can also come from outside the simulation: `MarketSimulator::submit`, `cancel`, and `replace` send them at the current simulated time, under the simulator's own order IDs. They meet the agents' orders like any other, are journaled with theirs, and count in the stats, while cancels and replaces reach only outside orders. The [browser playground](#try-it-in-your-browser) uses them to let visitors trade.
 
 The screen shows ten levels of depth per side with size bars, the spread and mid, the trade tape with the aggressor side and auction prints, one-second candles, the session clock, and live counters. These include the engine's request latency (p50 and p99, market data publishing included).
+
+<p align="center">
+  <img src="docs/assets/tui.gif" width="857" alt="The TradeMatch terminal UI: a live order book with depth bars, a trade tape, and one-second candles, as an agent-based market moves from the opening call auction into continuous trading">
+</p>
+<p align="center"><em><code>make tui</code>: trading agents on the engine, from the opening call auction into continuous trading.</em></p>
 
 A seed always replays the same market, on every platform. The standard library's random distributions produce different sequences with libc++, libstdc++, and the MSVC STL, so the simulator uses its own, and it is compiled without floating-point contraction (fused multiply-add). A golden-fingerprint test checks the stats and the entire book after a simulated day on Linux, macOS, and Windows in CI.
 

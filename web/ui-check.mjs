@@ -229,6 +229,28 @@ await check('the symbols and speeds switch', async () => {
   expect(await page.$eval('#speed', (menu) => menu.hidden), 'the speed menu should close');
 });
 
+await check('the keyboard drives the page, and ? lists the shortcuts', async () => {
+  await page.evaluate(() => document.activeElement?.blur());
+  await page.keyboard.press('3');
+  await page.keyboard.press('Minus');
+  await page.keyboard.press('s');
+  await sleep(200);
+  const selected = await page.$$eval('.ticker', (tickers) => tickers.map((ticker) => ticker.getAttribute('aria-selected')));
+  expect(selected.join() === 'false,false,true', `3 should show the third stock: ${selected}`);
+  expect((await read('#speed-label')) === '5×', 'minus should slow 10× to 5×');
+  expect(await page.$eval('.side-button.sell', (button) => button.getAttribute('aria-checked')) === 'true',
+    's should turn the ticket to selling');
+  await page.keyboard.press('?');
+  await sleep(200);
+  const rows = await page.$$eval('#shortcuts[open] dt', (terms) => terms.length);
+  expect(rows >= 8, `? should list the shortcuts, but ${rows} are shown`);
+  await page.keyboard.press('Escape');
+  await sleep(100);
+  expect(await page.$eval('#shortcuts', (dialog) => !dialog.open), 'Escape should close the list');
+  await page.keyboard.press('b');
+  return `${rows} shortcuts listed`;
+});
+
 await check('the command line plays an example in color, and completes commands', async () => {
   await page.click('.view-tab[data-view="terminal"]');
   await page.click('#examples button:first-child');

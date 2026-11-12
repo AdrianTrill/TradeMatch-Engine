@@ -4,8 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TradeMatch Engine · live in your browser</title>
-  <meta name="description" content="A C++20 order matching engine compiled to WebAssembly: watch a simulated market trade through auctions and continuous trading, or send it orders from its command line.">
+  <meta name="description" content="A C++20 order matching engine compiled to WebAssembly: watch a simulated market trade through auctions and continuous trading, trade against its agents, or send it orders from its command line.">
   <meta name="theme-color" content="#06080d">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="TradeMatch Engine">
+  <meta property="og:title" content="TradeMatch Engine · a matching engine, live in your browser">
+  <meta property="og:description" content="A price-time-priority order matching engine in C++20, compiled to WebAssembly. Watch trading agents move through call auctions and continuous trading, then trade against them, or drive the engine from its command line.">
+  <meta property="og:url" content="https://adriantrill.github.io/TradeMatch-Engine/">
+  <meta property="og:image" content="https://adriantrill.github.io/TradeMatch-Engine/social.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The TradeMatch playground: a live order book, candles around the simulator's fair value, depth, the tape, and a visitor's order and position on the chart">
+  <meta name="twitter:card" content="summary_large_image">
   <script>
     try {
       if (localStorage.getItem('tradematch-theme') === 'light') {
@@ -37,6 +47,7 @@
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5 7 7M17 17l1.5 1.5M5.5 18.5 7 17M17 7l1.5-1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
     <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.6 14.6A8 8 0 0 1 9.4 4.4a8 8 0 1 0 10.2 10.2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m7 7 10 10M17 7 7 17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5.5 12.5 4 4 9-9.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 8.5V7a2.5 2.5 0 0 0-2.5-2.5H7A2.5 2.5 0 0 0 4.5 7v6A2.5 2.5 0 0 0 7 15.5h1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
     <symbol id="i-clear" viewBox="0 0 24 24"><path d="M5 7h14M10 4.5h4M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M10.5 10.5v6M13.5 10.5v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
@@ -50,8 +61,8 @@
         <span class="wordmark">TradeMatch <span>Engine</span></span>
       </a>
       <nav class="views" aria-label="Views">
-        <button class="view-tab active" data-view="market"><svg class="icon"><use href="#i-chart"/></svg>Market</button>
-        <button class="view-tab" data-view="terminal"><svg class="icon"><use href="#i-terminal"/></svg>Command line</button>
+        <button class="view-tab active" data-view="market" title="The live market (M)"><svg class="icon"><use href="#i-chart"/></svg>Market</button>
+        <button class="view-tab" data-view="terminal" title="The engine's command line (C)"><svg class="icon"><use href="#i-terminal"/></svg>Command line</button>
       </nav>
       <div class="topbar-end">
         <span class="live-badge" title="The engine runs in this page, compiled from C++20 to WebAssembly. Nothing talks to a server.">
@@ -100,7 +111,7 @@
         <div class="controls">
           <button class="icon-button" id="play" title="Pause (space)" aria-label="Pause"><svg class="icon"><use href="#i-pause"/></svg></button>
           <div class="menu-anchor">
-            <button class="speed-button" id="speed-button" aria-haspopup="menu" aria-expanded="false" title="Simulated seconds per second">
+            <button class="speed-button" id="speed-button" aria-haspopup="menu" aria-expanded="false" title="Simulated seconds per second (− +)">
               <span id="speed-label">2×</span><svg class="icon"><use href="#i-chevron"/></svg>
             </button>
             <div class="menu" id="speed" role="menu" aria-label="Speed" hidden></div>
@@ -133,7 +144,7 @@
                 <button class="series vwap" data-series="vwap" aria-pressed="true" title="The day's volume-weighted average price; click to hide"><span class="swatch"></span>VWAP<b data-field="vwap"></b></button>
               </div>
             </div>
-            <button class="chart-live" id="live" hidden>Back to live<svg class="icon"><use href="#i-forward"/></svg></button>
+            <button class="chart-live" id="live" title="Back to live (L)" hidden>Back to live<svg class="icon"><use href="#i-forward"/></svg></button>
           </div>
         </section>
 
@@ -166,8 +177,8 @@
           <form class="panel-body ticket" id="ticket" autocomplete="off" novalidate>
             <span class="ticket-symbol" id="ticket-symbol" hidden></span>
             <div class="side-toggle" role="radiogroup" aria-label="Side">
-              <button type="button" class="side-button buy" data-side="BUY" role="radio">Buy</button>
-              <button type="button" class="side-button sell" data-side="SELL" role="radio">Sell</button>
+              <button type="button" class="side-button buy" data-side="BUY" role="radio" title="Buy (B)">Buy</button>
+              <button type="button" class="side-button sell" data-side="SELL" role="radio" title="Sell (S)">Sell</button>
             </div>
             <div class="order-types" role="radiogroup" aria-label="Order type">
               <button type="button" data-type="LIMIT" role="radio">Limit</button>
@@ -313,7 +324,16 @@
         <svg class="icon"><use href="#i-bolt"/></svg>
         <button id="rate" class="link" title="Measure again">measuring…</button>&nbsp;requests/s in this browser, agents included
       </span>
+      <button class="status-item shortcuts-link" id="open-shortcuts" type="button" title="Keyboard shortcuts (?)"><kbd>?</kbd>Shortcuts</button>
     </footer>
   </div>
+
+  <dialog id="shortcuts" class="dialog" aria-labelledby="shortcuts-title">
+    <header class="dialog-head">
+      <h2 id="shortcuts-title">Keyboard shortcuts</h2>
+      <button class="icon-button" type="button" data-close aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button>
+    </header>
+    <dl id="shortcut-list" class="shortcut-list"></dl>
+  </dialog>
 </body>
 </html>

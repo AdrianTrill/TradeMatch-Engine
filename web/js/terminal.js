@@ -232,6 +232,10 @@ export function startTerminal(tradematch) {
       event.preventDefault();
       output.replaceChildren();
     } else if (event.key === 'Escape') {
+      // Esc clears the line, and on an empty line leaves it, so the page's shortcuts work again.
+      if (input.value === '') {
+        input.blur();
+      }
       input.value = '';
       showHint();
     } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {

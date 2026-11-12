@@ -18,7 +18,7 @@ function apply(name) {
   const next = name === 'dark' ? 'light' : 'dark';
   const button = $('#theme');
   button.innerHTML = `<svg class="icon"><use href="#i-${next === 'light' ? 'sun' : 'moon'}"/></svg>`;
-  button.title = `${next === 'light' ? 'Light' : 'Dark'} theme`;
+  button.title = `${next === 'light' ? 'Light' : 'Dark'} theme (T)`;
   button.setAttribute('aria-label', `Switch to the ${next} theme`);
 }
 
