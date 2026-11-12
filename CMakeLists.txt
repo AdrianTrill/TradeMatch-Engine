@@ -10,7 +10,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(TRADEMATCH_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(TRADEMATCH_COVERAGE "Instrument all targets for gcov-based coverage reports" OFF)
 option(TRADEMATCH_LIBFUZZER "Build the coverage-guided libFuzzer target (requires LLVM clang)" OFF)
+option(TRADEMATCH_PYTHON "Build the Python extension module (requires pybind11); pip install . turns it on" OFF)
 set(TRADEMATCH_SANITIZERS "" CACHE STRING "Sanitizers for all targets, e.g. address,undefined or thread")
+
+# A Python extension is a shared library, so everything linked into it must be position independent.
+if(TRADEMATCH_PYTHON)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # Compile settings shared by every target in the project.
 add_library(tradematch_project_options INTERFACE)
@@ -266,4 +272,13 @@ if(TRADEMATCH_LIBFUZZER)
     if(WIN32)
         target_link_libraries(tradematch_fuzzer PRIVATE ws2_32)
     endif()
+endif()
+
+# The Python module, built by scikit-build-core from pyproject.toml.
+if(TRADEMATCH_PYTHON)
+    find_package(Python 3.9 COMPONENTS Interpreter Development.Module REQUIRED)
+    find_package(pybind11 CONFIG REQUIRED)
+    pybind11_add_module(_tradematch python/src/bindings.cpp)
+    target_link_libraries(_tradematch PRIVATE tradematch_sim tradematch_project_options)
+    install(TARGETS _tradematch DESTINATION tradematch)
 endif()

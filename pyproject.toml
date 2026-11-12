@@ -1,0 +1,40 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "tradematch"
+version = "1.0.0"
+description = "TradeMatch Engine from Python: a C++20 price-time-priority matching engine, its market simulator, and NASDAQ ITCH 5.0 replay"
+readme = "python/README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "AdrianTrill" }]
+keywords = ["matching engine", "order book", "market microstructure", "ITCH", "trading"]
+classifiers = [
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+notebook = ["numpy", "pandas", "matplotlib", "jupyterlab"]
+
+[project.urls]
+Homepage = "https://github.com/AdrianTrill/TradeMatch-Engine"
+Playground = "https://adriantrill.github.io/TradeMatch-Engine/"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build.targets = ["_tradematch"]
+wheel.packages = ["python/tradematch"]
+
+[tool.scikit-build.cmake.define]
+TRADEMATCH_PYTHON = "ON"
+BUILD_TESTING = "OFF"
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]

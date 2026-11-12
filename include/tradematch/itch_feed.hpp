@@ -104,6 +104,30 @@ struct ReplicaStats {
     Timestamp last_timestamp{0};
 };
 
+// A trade the feed prints: an execution of a displayed order, a trade with a non-displayed order, or a cross.
+struct FeedTrade {
+    SymbolId symbol{};
+    Timestamp timestamp{};
+    std::uint32_t price{};
+    std::uint64_t shares{};
+    std::uint64_t match_number{};
+    char type{};                    // the message that printed it: 'E' or 'C' an execution, 'P' a trade, 'Q' a cross
+    std::optional<Side> aggressor;  // the side that took liquidity, which only an execution of a displayed order shows
+};
+
+// Receives a replica's trades as it applies the messages that print them.
+class FeedTradeListener {
+public:
+    FeedTradeListener() = default;
+    FeedTradeListener(const FeedTradeListener&) = default;
+    FeedTradeListener& operator=(const FeedTradeListener&) = default;
+    FeedTradeListener(FeedTradeListener&&) = default;
+    FeedTradeListener& operator=(FeedTradeListener&&) = default;
+    virtual ~FeedTradeListener() = default;
+
+    virtual void on_trade(const FeedTrade& trade) = 0;
+};
+
 // Rebuilds every stock's order book from an ITCH 5.0 feed. The books are TradeMatch's own, held in auction mode:
 // orders rest exactly where the feed puts them and never match, because the feed reports each execution itself.
 // Prices stay in ITCH units, and orders keep their feed references as IDs.
@@ -130,6 +154,12 @@ public:
         return stats_;
     }
 
+    // Reports each trade the feed prints from now on to the listener, or to no one if it is null. The listener must
+    // outlive the replica or be removed first.
+    void set_trade_listener(FeedTradeListener* listener) noexcept {
+        trade_listener_ = listener;
+    }
+
     // Small books that grow as needed: NASDAQ lists thousands of stocks, most of them with thin books.
     static BookCapacity default_capacity() noexcept;
 
@@ -140,11 +170,17 @@ private:
     std::optional<SymbolId> symbol_at(std::uint16_t locate) const noexcept;
     SymbolId add_stock(std::uint16_t locate, std::string_view name);
     void add(const AddOrder& order);
-    // Takes shares off a resting order; returns its price, or nothing if the order is unknown.
-    std::optional<Price> take(std::uint16_t locate, std::uint64_t reference, std::uint32_t shares);
+    // Takes shares off a resting order; returns the order as it was, or nothing if it is unknown.
+    std::optional<RestingOrderView> take(std::uint16_t locate, std::uint64_t reference, std::uint32_t shares);
     void remove(std::uint16_t locate, std::uint64_t reference);
     void replace(const OrderReplace& replace);
-    void record_volume(std::optional<SymbolId> symbol, std::uint64_t shares, std::uint32_t price);
+    // Adds a trade to its stock's volume and reports it.
+    void record_trade(std::uint16_t locate,
+                      std::uint64_t shares,
+                      std::uint32_t price,
+                      std::uint64_t match_number,
+                      char type,
+                      std::optional<Side> aggressor);
     void count_order(bool added) noexcept;
 
     MatchingEngine engine_;
@@ -152,6 +188,7 @@ private:
     std::vector<std::optional<SymbolId>> symbols_;  // by stock locate
     std::vector<StockStats> stock_stats_;           // by symbol
     ReplicaStats stats_;
+    FeedTradeListener* trade_listener_{nullptr};
 };
 
 // Compares a replica with the engine whose feed built it: each symbol's levels must hold the same orders, under

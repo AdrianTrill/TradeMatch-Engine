@@ -1,8 +1,9 @@
 // Coverage-guided fuzz target for ITCH 5.0. Arbitrary bytes are read twice. First as messages, each typed by its first
 // byte: any that decodes must re-encode to exactly the same bytes, and all of them go to a replica, which must count
 // what doesn't fit its books rather than fail. Then as order flow for an engine whose ITCH feed must rebuild its book
-// exactly after every request.
+// exactly after every request, and print exactly the engine's trades.
 #include "support/differential.hpp"
+#include "support/feed_tape.hpp"
 #include "tradematch/itch.hpp"
 #include "tradematch/itch_feed.hpp"
 #include "tradematch/matching_engine.hpp"
@@ -27,6 +28,8 @@ namespace itch = tradematch::itch;
 
 void check_messages(std::span<const std::uint8_t> input) {
     itch::BookReplica replica;
+    tradematch::testing::TradeTape tape;
+    replica.set_trade_listener(&tape);
     std::vector<std::uint8_t> again;
     while (!input.empty()) {
         // A known type takes its exact length, so most messages decode; anything else is a short run of garbage.
@@ -66,9 +69,13 @@ void check_feed(const std::uint8_t* data, std::size_t size) {
     tradematch::MatchingEngine engine;
     const auto symbol = engine.add_symbol("FUZZ", tradematch::BookCapacity{1, 1, 1});
     itch::FeedPublisher publisher(engine);
-    engine.set_order_listener(&publisher);
+    tradematch::testing::ExpectedTape expected(publisher);
+    engine.set_order_listener(&expected);
     itch::BookReplica replica;
+    tradematch::testing::TradeTape tape;
+    replica.set_trade_listener(&tape);
     tradematch::OrderBook& book = engine.book(symbol);
+    std::size_t checked = 0;  // the trades compared so far
 
     tradematch::testing::ByteDecoder decoder(data, size);
     while (!decoder.done()) {
@@ -101,6 +108,15 @@ void check_feed(const std::uint8_t* data, std::size_t size) {
             fail("the ITCH feed didn't rebuild the book after " + tradematch::testing::describe(op) + ": " +
                  difference);
         }
+        const auto& printed = tape.trades();
+        const auto& traded = expected.trades();
+        if (printed.size() != traded.size() || !std::equal(traded.begin() + static_cast<std::ptrdiff_t>(checked),
+                                                           traded.end(),
+                                                           printed.begin() + static_cast<std::ptrdiff_t>(checked),
+                                                           tradematch::testing::same_trade)) {
+            fail("the replica's trades aren't the engine's after " + tradematch::testing::describe(op));
+        }
+        checked = traded.size();
     }
     if (replica.stats().anomalies != 0U) {
         fail("the replica found anomalies in the engine's own feed");

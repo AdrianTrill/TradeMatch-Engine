@@ -15,6 +15,7 @@ concurrency:
 env:
   LLVM_TOOLS_VERSION: "22.1.8"
   GCOVR_VERSION: "8.8"
+  PYBIND11_VERSION: "3.1.0"
 
 jobs:
   build-and-test:
@@ -129,15 +130,55 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install clang-tidy
-        run: pip install "clang-tidy==${LLVM_TOOLS_VERSION}"
+      - name: Install clang-tidy and pybind11
+        run: pip install "clang-tidy==${LLVM_TOOLS_VERSION}" "pybind11==${PYBIND11_VERSION}"
 
       - name: Export compile commands
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
+        # With the Python module, so that its binding is linted against pybind11's headers.
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
+          -DTRADEMATCH_PYTHON=ON -DPython_EXECUTABLE="$(command -v python)" -Dpybind11_DIR="$(python -m pybind11 --cmakedir)"
 
       - name: Run clang-tidy
         # The WebAssembly binding in web/ only compiles with Emscripten; the Playground workflow builds it with -Werror.
         run: git ls-files '*.cpp' ':!web/*' | xargs -P "$(nproc)" -n 1 clang-tidy -p build --quiet
+
+  python:
+    name: Python / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+          - name: macOS
+            os: macos-latest
+          - name: Windows
+            os: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Build and install the package
+        run: pip install ".[test]" --config-settings=cmake.define.TRADEMATCH_WARNINGS_AS_ERRORS=ON
+
+      - name: Test
+        run: pytest -v
+
+      - name: Run the notebook
+        # Without NASDAQ's file, the real-data section explains how to get it and skips.
+        if: runner.os == 'Linux'
+        run: |
+          pip install numpy pandas matplotlib nbconvert ipykernel
+          jupyter nbconvert --to notebook --execute --output "$RUNNER_TEMP/notebook.ipynb" \
+            notebooks/market_microstructure.ipynb
 
   coverage:
     name: Coverage

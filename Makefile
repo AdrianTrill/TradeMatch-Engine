@@ -43,6 +43,7 @@ JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 CLANG_FORMAT ?= clang-format
 CLANG_TIDY ?= clang-tidy
 GCOVR ?= gcovr
+PYTHON ?= python3
 
 ifeq ($(shell uname -s),Darwin)
 # Apple keeps libc++ inside the SDK, so standalone LLVM tools need the sysroot; gcov data is read by llvm-cov.
@@ -238,9 +239,18 @@ format:
 format-check:
 	$(CLANG_FORMAT) --dry-run --Werror $(SOURCES)
 
+# The Python binding is linted when pybind11 is installed (pip install pybind11), since it compiles against its headers.
 lint:
-	cmake -S . -B $(BUILD_DIR)/lint -DCMAKE_BUILD_TYPE=Debug > /dev/null
-	git ls-files '*.cpp' ':!web/*' | xargs -P $(JOBS) -n 1 $(CLANG_TIDY) -p $(BUILD_DIR)/lint --quiet $(TIDY_FLAGS)
+	@pybind11_dir=$$($(PYTHON) -m pybind11 --cmakedir 2>/dev/null); \
+	if [ -n "$$pybind11_dir" ]; then \
+		cmake -S . -B $(BUILD_DIR)/lint -DCMAKE_BUILD_TYPE=Debug -DTRADEMATCH_PYTHON=ON \
+			"-DPython_EXECUTABLE=$$(command -v $(PYTHON))" "-Dpybind11_DIR=$$pybind11_dir" > /dev/null; \
+	else \
+		echo "pybind11 isn't installed, so python/ isn't linted"; \
+		cmake -S . -B $(BUILD_DIR)/lint -DCMAKE_BUILD_TYPE=Debug -DTRADEMATCH_PYTHON=OFF > /dev/null; \
+	fi && \
+	git ls-files '*.cpp' ':!web/*' | { if [ -n "$$pybind11_dir" ]; then cat; else grep -v '^python/'; fi; } | \
+		xargs -P $(JOBS) -n 1 $(CLANG_TIDY) -p $(BUILD_DIR)/lint --quiet $(TIDY_FLAGS)
 
 sanitize:
 	cmake -S . -B $(BUILD_DIR)/sanitize -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTRADEMATCH_WARNINGS_AS_ERRORS=ON \

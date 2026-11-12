@@ -243,7 +243,13 @@ void BookReplica::count_order(bool added) noexcept {
     }
 }
 
-void BookReplica::record_volume(std::optional<SymbolId> symbol, std::uint64_t shares, std::uint32_t price) {
+void BookReplica::record_trade(std::uint16_t locate,
+                               std::uint64_t shares,
+                               std::uint32_t price,
+                               std::uint64_t match_number,
+                               char type,
+                               std::optional<Side> aggressor) {
+    const auto symbol = symbol_at(locate);
     if (!symbol) {
         return;
     }
@@ -252,6 +258,10 @@ void BookReplica::record_volume(std::optional<SymbolId> symbol, std::uint64_t sh
     stock.value += static_cast<double>(shares) * static_cast<double>(price) / kPriceScale;
     ++stock.executions;
     stock.last_price = price;
+    if (trade_listener_ != nullptr) {
+        trade_listener_->on_trade(
+            FeedTrade{*symbol, stats_.last_timestamp, price, shares, match_number, type, aggressor});
+    }
 }
 
 void BookReplica::add(const AddOrder& order) {
@@ -275,7 +285,7 @@ void BookReplica::add(const AddOrder& order) {
     }
 }
 
-std::optional<Price> BookReplica::take(std::uint16_t locate, std::uint64_t reference, std::uint32_t shares) {
+std::optional<RestingOrderView> BookReplica::take(std::uint16_t locate, std::uint64_t reference, std::uint32_t shares) {
     const auto symbol = symbol_at(locate);
     if (!symbol) {
         ++stats_.anomalies;
@@ -296,7 +306,7 @@ std::optional<Price> BookReplica::take(std::uint16_t locate, std::uint64_t refer
         book.replace(
             OrderRequest{reference, order->side, OrderType::Limit, order->remaining_quantity - shares, order->price});
     }
-    return order->price;
+    return order;
 }
 
 void BookReplica::remove(std::uint16_t locate, std::uint64_t reference) {
@@ -344,19 +354,33 @@ struct BookReplica::Applier {
     void operator()(const AddOrder& order) const {
         replica.add(order);
     }
+    // An execution's aggressor is the side opposite the order it executes.
+    static Side taker_of(const RestingOrderView& order) noexcept {
+        return order.side == Side::Buy ? Side::Sell : Side::Buy;
+    }
+
     void operator()(const OrderExecuted& executed) const {
         const std::uint16_t locate = executed.header.stock_locate;
-        if (const auto price = replica.take(locate, executed.order_reference, executed.executed_shares)) {
-            replica.record_volume(replica.symbol_at(locate),
-                                  executed.executed_shares,
-                                  static_cast<std::uint32_t>(*price));
+        if (const auto order = replica.take(locate, executed.order_reference, executed.executed_shares)) {
+            replica.record_trade(locate,
+                                 executed.executed_shares,
+                                 static_cast<std::uint32_t>(order->price),
+                                 executed.match_number,
+                                 'E',
+                                 taker_of(*order));
         }
     }
     void operator()(const OrderExecutedWithPrice& executed) const {
         const std::uint16_t locate = executed.header.stock_locate;
+        const auto order = replica.take(locate, executed.order_reference, executed.executed_shares);
         // A non-printable execution's volume arrives in a cross trade message instead.
-        if (replica.take(locate, executed.order_reference, executed.executed_shares) && executed.printable == 'Y') {
-            replica.record_volume(replica.symbol_at(locate), executed.executed_shares, executed.execution_price);
+        if (order && executed.printable == 'Y') {
+            replica.record_trade(locate,
+                                 executed.executed_shares,
+                                 executed.execution_price,
+                                 executed.match_number,
+                                 'C',
+                                 taker_of(*order));
         }
     }
     void operator()(const OrderCancel& cancel) const {
@@ -368,11 +392,18 @@ struct BookReplica::Applier {
     void operator()(const OrderReplace& replacement) const {
         replica.replace(replacement);
     }
+    // NASDAQ no longer says which side of a non-displayed trade rested, and a cross has no aggressor.
     void operator()(const NonCrossTrade& trade) const {
-        replica.record_volume(replica.symbol_at(trade.header.stock_locate), trade.shares, trade.price);
+        replica
+            .record_trade(trade.header.stock_locate, trade.shares, trade.price, trade.match_number, 'P', std::nullopt);
     }
     void operator()(const CrossTrade& cross) const {
-        replica.record_volume(replica.symbol_at(cross.header.stock_locate), cross.shares, cross.cross_price);
+        replica.record_trade(cross.header.stock_locate,
+                             cross.shares,
+                             cross.cross_price,
+                             cross.match_number,
+                             'Q',
+                             std::nullopt);
     }
     void operator()(const SystemEvent& /*message*/) const noexcept {}
     void operator()(const StockTradingAction& /*message*/) const noexcept {}

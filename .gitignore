@@ -16,3 +16,9 @@ crash-*
 leak-*
 timeout-*
 .cache/
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+notebooks/data/

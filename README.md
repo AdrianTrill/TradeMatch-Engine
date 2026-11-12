@@ -220,13 +220,16 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 .
 ├── .github/workflows/
 │   ├── ci.yml
-│   └── fuzz.yml
+│   ├── fuzz.yml
+│   └── playground.yml
 ├── .clang-format
 ├── .clang-tidy
 ├── .editorconfig
 ├── CMakeLists.txt
 ├── Makefile
+├── pyproject.toml
 ├── docs/assets/
+│   ├── microstructure.png
 │   ├── playground.png
 │   └── tui.gif
 ├── include/tradematch/
@@ -316,6 +319,15 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── itch_main.cpp
 │   ├── replay_main.cpp
 │   └── tui_main.cpp
+├── python/
+│   ├── README.md
+│   ├── src/bindings.cpp
+│   ├── tests/
+│   │   └── test_*.py
+│   └── tradematch/
+│       └── __init__.py
+├── notebooks/
+│   └── market_microstructure.ipynb
 └── web/
     ├── app.js
     ├── check.mjs
@@ -694,7 +706,7 @@ SPY at 10:00:00.000, 29 orders resting
 
 **A real trading day.** NASDAQ publishes historical ITCH files at [emi.nasdaq.com/ITCH](https://emi.nasdaq.com/ITCH/). Replaying the whole session of NASDAQ BX on December 30, 2019 (29,156,757 messages for 8,906 stocks, 862 MB) takes 2.1 seconds on the M4, 14 million messages a second. Every message decodes and fits the book it applies to: there are no invalid messages and no anomalies, and every book ends the day empty, as it should. At the busiest moment the replica holds 76,126 resting orders. A day on NASDAQ's main market has about ten times as many messages; `gunzip -c FILE.gz | tradematch_itch replay -` streams one without unpacking it to disk.
 
-**The replica.** `BookReplica` keeps a TradeMatch `OrderBook` per stock, held in auction mode so that it never matches. An exchange feed reports every execution itself, so a book that matched crossing orders would execute them twice. Adds join the back of their queue, executions and partial cancels amend orders in place so they keep their place, replaces re-enter at the back under a new reference, and deletes remove. A message that doesn't fit the books, such as a delete of an order that was never added, is counted as an anomaly rather than trusted.
+**The replica.** `BookReplica` keeps a TradeMatch `OrderBook` per stock, held in auction mode so that it never matches. An exchange feed reports every execution itself, so a book that matched crossing orders would execute them twice. Adds join the back of their queue, executions and partial cancels amend orders in place so they keep their place, replaces re-enter at the back under a new reference, and deletes remove. A message that doesn't fit the books, such as a delete of an order that was never added, is counted as an anomaly rather than trusted. A trade listener hears every trade the feed prints, with the side that took liquidity wherever the feed shows it: the side opposite the order an execution names. Trades with hidden orders don't say, and crosses have no aggressor.
 
 **Publishing.** `FeedPublisher` turns the book's [order events](#multiple-instruments-and-market-data) into ITCH: a stock directory message for each symbol, then adds, executions, partial cancels, deletes, and replaces. A replace that re-enters the book without trading is a single replace message. Auction executions are non-printable executions whose volume a cross trade message reports. Order references are renewed whenever an order, or an iceberg's next tranche, joins the back of a queue, as ITCH requires. A price the 32-bit price field can't carry, above $429,496.7295 (the ceiling Berkshire Hathaway's class A shares ran into in 2021), is refused rather than wrapped around. `tradematch_itch generate` runs the [market simulator](#live-market-simulator) through one trading day and writes its feed: 2.4 million messages for a 30-minute session of three stocks, in under a second. With `--verify` it then replays the file and checks that every book comes back order for order, under the same references and in the same queue order.
 
@@ -704,7 +716,42 @@ gunzip -c FILE.gz | ./build/tradematch_itch replay -               # straight fr
 ./build/tradematch_itch generate day.itch --minutes 30 --verify    # a simulated day, checked by replaying it
 ```
 
-**Tests.** [tests/itch_tests.cpp](tests/itch_tests.cpp) checks an add order against bytes laid out by hand from the specification, that all 23 ITCH 5.0 message types decode at exactly their specified lengths and re-encode byte for byte, and that files stream across block boundaries while a torn last message is reported. The engine's feed must rebuild its book exactly after each of 60,000 adversarial operations (auctions, icebergs, stops, self-trade prevention, replaces, and snapshot restores), and a simulated day must survive the round trip through a file. Volume accounting and each kind of anomaly have their own checks. Since a comparison that never reported a difference would make all of that pass, each kind of difference is also planted in a replica to check that it is found. A fourth fuzz target decodes and re-encodes arbitrary messages, and drives fuzzed order flow through the engine, its feed, and a replica, stopping at the first difference.
+**Tests.** [tests/itch_tests.cpp](tests/itch_tests.cpp) checks an add order against bytes laid out by hand from the specification, that all 23 ITCH 5.0 message types decode at exactly their specified lengths and re-encode byte for byte, and that files stream across block boundaries while a torn last message is reported. The engine's feed must rebuild its book exactly after each of 60,000 adversarial operations (auctions, icebergs, stops, self-trade prevention, replaces, and snapshot restores), and a simulated day must survive the round trip through a file. Volume accounting and each kind of anomaly have their own checks, and the trades a replica reports for a replayed simulated day must be exactly the engine's own: every continuous trade with its aggressor, and each auction as a single cross. Since a comparison that never reported a difference would make all of that pass, each kind of difference is also planted in a replica to check that it is found. A fourth fuzz target decodes and re-encodes arbitrary messages, and drives fuzzed order flow through the engine, its feed, and a replica, stopping at the first difference.
+
+## Python and Market Microstructure
+
+The order book, the market simulator, and ITCH replay are also a Python package, built from the same C++ with pybind11 by `pip install .`. Long runs release the GIL, so simulators in separate threads run in parallel, while an object busy in one thread raises an error in any other rather than racing it.
+
+```python
+import tradematch as tm
+
+book = tm.OrderBook()
+book.submit(1, tm.Side.SELL, 100, 10_050)
+book.submit(2, tm.Side.BUY, 160, 10_050, time_in_force=tm.TimeInForce.IOC).trades  # [Trade(100 @ 10050, buy=2, sell=1)]
+
+simulator = tm.MarketSimulator(seed=42, market_makers=1)  # agent counts, volatility, and session lengths are arguments
+simulator.run_day()
+trades, quotes = simulator.take_trades(), simulator.take_quotes()  # every trade, and the top of book every 10 ms
+
+replica = tm.ItchReplica("20191230.BX_ITCH_50", watch=["GDX"])
+replica.advance("10:00")                          # the books as of 10:00; the next call carries on from there
+replica.top_of_book("GDX"), replica.take_trades()  # trades come with the side that took liquidity
+```
+
+The [market microstructure notebook](notebooks/market_microstructure.ipynb) puts this to work. It measures the simulated market the way empirical studies measure real ones, and runs an experiment only a simulator can: the same market with 0 to 16 market makers. Then it replays the whole NASDAQ BX day of December 30, 2019, 29 million messages in under four seconds from Python while sampling a book every 100 ms, and repeats the measurements on GDX, the stock with the most trades on BX that day:
+
+<p align="center">
+  <img src="docs/assets/microstructure.png" width="857" alt="Four charts: a simulated mid price tracking its hidden fair value; the mean spread falling from about six ticks with no market makers to about one tick with one or more; the probability that the next mid-price move is up rising with queue imbalance, for the simulator and for GDX on NASDAQ BX; and the autocorrelation of order signs, high and fast-decaying for GDX and low and slow-decaying for the simulator">
+</p>
+
+Both markets show the textbook patterns: the imbalance between the queues at the best bid and offer predicts the direction of the next price move, and buy orders follow buy orders. The comparison also shows where the simulator falls short. Real order flow is far more persistent over the next few dozen orders, the pattern usually attributed to algorithms slicing large orders into small ones, and none of the simulator's agents do that yet.
+
+```bash
+pip install ".[test]" && pytest                # the package and its tests
+pip install ".[notebook]" && jupyter lab notebooks/market_microstructure.ipynb
+```
+
+**Tests.** [python/tests](python/tests) checks the book's rules from Python: price-time priority, time in force, rejects, replaces that keep or lose their place, icebergs, stops, self-trade prevention, and call auctions. A seed must replay the same market, in threads too. The simulator's tape must agree with the engine's own market-data feed, a market without market makers must have wider spreads, and a busy simulator must refuse other threads. The ITCH tests replay a file encoded byte by byte with `struct.pack` from the specification, independently of the C++ encoder, stopping partway through the day and carrying on.
 
 ## Example Workflow
 
@@ -950,7 +997,8 @@ Every push runs three workflows:
 | CI | Sanitizers | Every test under AddressSanitizer (with leak detection) and UndefinedBehaviorSanitizer |
 | CI | Thread sanitizer | Every test under ThreadSanitizer, covering the pipeline's threads and the journal's I/O thread |
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
-| CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
+| CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors, the Python binding included |
+| CI | Python / Linux, macOS, Windows | The Python package built with warnings as errors, then its pytest suite; on Linux, the notebook executed end to end |
 | CI | Smoke tests | Every scenario's transcript matches its golden file. `tradematch_benchmark` and `tradematch_pipeline_benchmark` run short workloads, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform. The pipeline benchmark also checks its book against a single-threaded replay |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 97% of lines and 86% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
@@ -967,4 +1015,4 @@ It is also a strong stepping stone for deeper systems work, such as putting the 
 
 - MoldUDP64, the transport that carries ITCH live, alongside its file format
 - FIX resend requests and sequence numbers that persist across reconnects
-- Python bindings
+- An agent that slices large orders into small ones, so the simulator's order flow persists like real flow

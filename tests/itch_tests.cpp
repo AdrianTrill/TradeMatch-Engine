@@ -1,4 +1,5 @@
 #include "support/differential.hpp"
+#include "support/feed_tape.hpp"
 #include "tradematch/detail/file_io.hpp"
 #include "tradematch/itch.hpp"
 #include "tradematch/itch_feed.hpp"
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -26,6 +28,9 @@
 namespace {
 
 namespace itch = tradematch::itch;
+using tradematch::testing::ExpectedTape;
+using tradematch::testing::same_trade;
+using tradematch::testing::TradeTape;
 
 class TestFailure : public std::runtime_error {
 public:
@@ -378,6 +383,58 @@ void test_replica_volume_and_anomalies() {
            "An add should be able to introduce its stock.");
 }
 
+void test_replica_reports_the_trades_it_prints() {
+    using tradematch::Side;
+    itch::BookReplica replica;
+    TradeTape tape;
+    replica.set_trade_listener(&tape);
+    const itch::Stock stock = itch::make_stock("TEST");
+    const auto at = [](std::uint64_t time) {
+        return itch::Header{1, 0, time};
+    };
+    itch::StockDirectory directory{at(1)};
+    directory.stock = stock;
+    replica.apply(directory);
+    itch::AddOrder bid{at(2)};
+    bid.order_reference = 1;
+    bid.side = 'B';
+    bid.shares = 100;
+    bid.stock = stock;
+    bid.price = 100'000;
+    replica.apply(bid);
+    itch::AddOrder offer = bid;
+    offer.order_reference = 2;
+    offer.side = 'S';
+    offer.price = 100'100;
+    replica.apply(offer);
+
+    replica.apply(itch::OrderExecuted{at(3), 1, 30, 11});                         // a seller takes the bid
+    replica.apply(itch::OrderExecutedWithPrice{at(4), 2, 20, 12, 'Y', 100'050});  // a buyer takes the offer
+    replica.apply(itch::OrderExecutedWithPrice{at(5), 2, 10, 13, 'N', 100'050});  // printed by a cross instead
+    replica.apply(itch::NonCrossTrade{at(6), 0, 'B', 25, stock, 100'060, 14});
+    replica.apply(itch::CrossTrade{at(7), 500, stock, 100'070, 15, 'C'});
+    replica.apply(itch::OrderExecuted{at(8), 999, 5, 16});  // an unknown order prints nothing
+
+    const auto symbol = replica.find("TEST");
+    expect(symbol.has_value(), "The stock should exist.");
+    const tradematch::SymbolId id = symbol.value_or(0);
+    const std::vector<itch::FeedTrade> expected = {
+        {id, 3, 100'000, 30, 11, 'E', Side::Sell},
+        {id, 4, 100'050, 20, 12, 'C', Side::Buy},
+        {id, 6, 100'060, 25, 14, 'P', std::nullopt},
+        {id, 7, 100'070, 500, 15, 'Q', std::nullopt},
+    };
+    expect(tape.trades().size() == expected.size() &&
+               std::equal(expected.begin(), expected.end(), tape.trades().begin(), same_trade),
+           "The replica should report each printed trade with its aggressor, where the feed shows one.");
+    expect(tape.trades().at(1).match_number == 12U && tape.trades().at(3).match_number == 15U,
+           "Trades should carry their match numbers.");
+
+    replica.set_trade_listener(nullptr);
+    replica.apply(itch::OrderExecuted{at(9), 1, 10, 17});
+    expect(tape.trades().size() == expected.size(), "A removed listener should hear nothing more.");
+}
+
 bool contains(const std::string& text, std::string_view part) {
     return text.find(part) != std::string::npos;
 }
@@ -495,10 +552,11 @@ void test_simulated_day_round_trips_through_a_file() {
     config.measure_latency = false;
     tradematch::MarketSimulator simulator(config);
     itch::FeedPublisher publisher(simulator.engine());
-    simulator.set_order_listener(&publisher);
+    ExpectedTape expected(publisher);
+    simulator.set_order_listener(&expected);
     publisher.system_event('O');
     while (simulator.session() != tradematch::SessionPhase::Closed) {
-        publisher.set_time(static_cast<std::uint64_t>(simulator.now() + config.step));
+        expected.set_time(static_cast<std::uint64_t>(simulator.now() + config.step));
         publisher.set_cross_type(simulator.session() == tradematch::SessionPhase::OpeningAuction ? 'O' : 'C');
         simulator.step();
     }
@@ -509,6 +567,8 @@ void test_simulated_day_round_trips_through_a_file() {
     std::FILE* input = file.open();
     itch::FileReader reader(input);
     itch::BookReplica replica;
+    TradeTape tape;
+    replica.set_trade_listener(&tape);
     while (const auto message = reader.next()) {
         replica.apply(*message);
     }
@@ -523,6 +583,19 @@ void test_simulated_day_round_trips_through_a_file() {
         expect(publisher.message_count(type) > 0U,
                std::string{"A simulated day should publish '"} + type + "' messages.");
     }
+    // The replica numbers stocks in the order the feed announces them, so symbols are matched by name.
+    std::vector<itch::FeedTrade> engine_tape = expected.trades();
+    for (itch::FeedTrade& trade : engine_tape) {
+        trade.symbol = replica.find(simulator.engine().symbol_name(trade.symbol)).value_or(trade.symbol + 100);
+    }
+    expect(tape.trades().size() == engine_tape.size() &&
+               std::equal(engine_tape.begin(), engine_tape.end(), tape.trades().begin(), same_trade),
+           "The replica's tape should be the engine's trades, with each auction as one cross.");
+    const auto crosses = std::count_if(tape.trades().begin(), tape.trades().end(), [](const itch::FeedTrade& trade) {
+        return trade.type == 'Q';
+    });
+    expect(crosses > 0 && static_cast<std::size_t>(crosses) < tape.trades().size(),
+           "The tape should hold both continuous trades and auction crosses.");
     std::cout << "       " << publisher.message_count() << " messages for a simulated day of "
               << simulator.stats().trades << " trades and " << simulator.stats().auctions << " auctions\n";
 }
@@ -540,6 +613,7 @@ int run_all_tests() {
         {"file_reader_streams_messages", test_file_reader_streams_messages},
         {"feed_rebuilds_the_engine_exactly", test_feed_rebuilds_the_engine_exactly},
         {"replica_volume_and_anomalies", test_replica_volume_and_anomalies},
+        {"replica_reports_the_trades_it_prints", test_replica_reports_the_trades_it_prints},
         {"differences_are_found", test_differences_are_found},
         {"publisher_refuses_what_itch_cannot_carry", test_publisher_refuses_what_itch_cannot_carry},
         {"simulated_day_round_trips_through_a_file", test_simulated_day_round_trips_through_a_file},
