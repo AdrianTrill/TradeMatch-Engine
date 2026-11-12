@@ -49,6 +49,9 @@ jobs:
           # Journal and snapshot decoding, replay, and restore.
           - target: tradematch_journal_fuzzer
             corpus: journal
+          # FIX parsing, session handling, and order entry.
+          - target: tradematch_fix_fuzzer
+            corpus: fix
     env:
       # Short smoke runs on every push, a longer nightly campaign, and a configurable manual budget.
       FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1200' || inputs.seconds || '60' }}

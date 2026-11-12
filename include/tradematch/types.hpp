@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -187,6 +188,9 @@ const char* to_string(TimeInForce time_in_force) noexcept;
 const char* to_string(SelfTradePrevention mode) noexcept;
 const char* to_string(RejectReason reason) noexcept;
 std::string format_price(Price price);
+// Parses a decimal price with at most two places, such as "100", "100.5", or "-1.25", into ticks. Returns nothing for
+// anything else, including more decimals than a tick can represent and prices out of range.
+std::optional<Price> parse_price(std::string_view text);
 
 }  // namespace tradematch
 

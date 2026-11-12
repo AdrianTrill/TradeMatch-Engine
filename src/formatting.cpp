@@ -1,7 +1,10 @@
 #include "tradematch/types.hpp"
 
+#include <algorithm>
 #include <iomanip>
+#include <optional>
 #include <sstream>
+#include <string_view>
 
 namespace tradematch {
 
@@ -96,6 +99,32 @@ const char* to_string(RejectReason reason) noexcept {
     }
 
     return "UNKNOWN";
+}
+
+std::optional<Price> parse_price(std::string_view text) {
+    const bool negative = text.starts_with('-');
+    const std::string_view digits = negative ? text.substr(1) : text;
+    const auto point = digits.find('.');
+    const std::string_view whole = digits.substr(0, point);
+    const std::string_view fraction = point == std::string_view::npos ? std::string_view{} : digits.substr(point + 1);
+    const auto all_digits = [](std::string_view part) {
+        return std::ranges::all_of(part, [](char character) { return character >= '0' && character <= '9'; });
+    };
+    if (whole.empty() || whole.size() > 16 || !all_digits(whole) || !all_digits(fraction) || fraction.size() > 2 ||
+        (point != std::string_view::npos && fraction.empty())) {
+        return std::nullopt;
+    }
+    Price ticks = 0;
+    for (const char character : whole) {
+        ticks = ticks * 10 + (character - '0');
+    }
+    ticks *= 100;
+    if (!fraction.empty()) {
+        const Price cents =
+            fraction.size() == 1 ? (fraction[0] - '0') * 10 : (fraction[0] - '0') * 10 + (fraction[1] - '0');
+        ticks += cents;
+    }
+    return negative ? -ticks : ticks;
 }
 
 std::string format_price(Price price) {

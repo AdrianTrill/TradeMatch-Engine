@@ -6,8 +6,9 @@ DEPFLAGS = -MMD -MP
 BUILD_DIR ?= build
 OBJ_DIR := $(BUILD_DIR)/obj
 
-ENGINE_SRC := src/cli.cpp src/codec.cpp src/file_io.cpp src/formatting.cpp src/journal.cpp src/market_data.cpp \
-	src/matching_engine.cpp src/order_book.cpp src/pipeline.cpp src/snapshot.cpp
+ENGINE_SRC := src/cli.cpp src/codec.cpp src/file_io.cpp src/fix.cpp src/fix_gateway.cpp src/formatting.cpp \
+	src/journal.cpp src/market_data.cpp src/matching_engine.cpp src/order_book.cpp src/pipeline.cpp src/snapshot.cpp \
+	src/socket.cpp
 ENGINE_OBJ := $(ENGINE_SRC:%.cpp=$(OBJ_DIR)/%.o)
 
 DEMO_BIN := $(BUILD_DIR)/tradematch_demo
@@ -15,6 +16,10 @@ TUI_BIN := $(BUILD_DIR)/tradematch_tui
 REPLAY_BIN := $(BUILD_DIR)/tradematch_replay
 CLI_BIN := $(BUILD_DIR)/tradematch_cli
 CLI_TEST_BIN := $(BUILD_DIR)/tradematch_cli_tests
+FIX_GATEWAY_BIN := $(BUILD_DIR)/tradematch_fix_gateway
+FIX_CLIENT_BIN := $(BUILD_DIR)/tradematch_fix_client
+FIX_TEST_BIN := $(BUILD_DIR)/tradematch_fix_tests
+FIX_FUZZ_BIN := $(BUILD_DIR)/tradematch_fix_fuzz_standalone
 SCENARIOS := $(wildcard tests/scenarios/*.tm)
 SIM_TEST_BIN := $(BUILD_DIR)/tradematch_simulator_tests
 JOURNAL_TEST_BIN := $(BUILD_DIR)/tradematch_journal_tests
@@ -50,6 +55,10 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tools/replay_main.o \
 	$(OBJ_DIR)/tools/cli_main.o \
 	$(OBJ_DIR)/tests/cli_tests.o \
+	$(OBJ_DIR)/tools/fix_gateway_main.o \
+	$(OBJ_DIR)/tools/fix_client_main.o \
+	$(OBJ_DIR)/tests/fix_tests.o \
+	$(OBJ_DIR)/fuzz/fix_fuzzer.o \
 	$(OBJ_DIR)/src/simulator.o \
 	$(OBJ_DIR)/tests/simulator_tests.o \
 	$(OBJ_DIR)/tests/journal_tests.o \
@@ -71,7 +80,8 @@ ALL_OBJ := $(ENGINE_OBJ) \
 .PHONY: all test demo tui cli scenarios replay-demo benchmark pipeline-benchmark fuzz-long format format-check lint \
 	sanitize tsan coverage cmake-configure cmake-build clean
 
-all: $(DEMO_BIN) $(TUI_BIN) $(REPLAY_BIN) $(CLI_BIN) $(CLI_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) $(BENCH_BIN) \
+all: $(DEMO_BIN) $(TUI_BIN) $(REPLAY_BIN) $(CLI_BIN) $(CLI_TEST_BIN) $(FIX_GATEWAY_BIN) $(FIX_CLIENT_BIN) $(FIX_TEST_BIN) \
+	$(FIX_FUZZ_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) $(BENCH_BIN) \
 	$(PIPELINE_BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
 	$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
 
@@ -100,6 +110,18 @@ $(CLI_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/cli_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(CLI_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/cli_tests.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(FIX_GATEWAY_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/fix_gateway_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(FIX_CLIENT_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/fix_client_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(FIX_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/fix_tests.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(FIX_FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/fix_fuzzer.o $(OBJ_DIR)/fuzz/standalone_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(JOURNAL_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tests/journal_tests.o
@@ -142,9 +164,11 @@ $(JOURNAL_FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/journal_fuzzer.o $(OBJ_DIR)/f
 
 test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
 		$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) \
-		$(CLI_TEST_BIN) replay-demo scenarios
+		$(CLI_TEST_BIN) $(FIX_TEST_BIN) $(FIX_FUZZ_BIN) replay-demo scenarios
 	./$(TEST_BIN)
 	./$(CLI_TEST_BIN)
+	./$(FIX_TEST_BIN)
+	./$(FIX_FUZZ_BIN) --iterations 3000
 	./$(SIM_TEST_BIN)
 	./$(JOURNAL_TEST_BIN)
 	./$(PIPELINE_TEST_BIN)

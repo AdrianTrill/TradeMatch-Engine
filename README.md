@@ -48,6 +48,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Atomic snapshots, recovery from a snapshot plus the journal tail, and a 64-bit hash of the complete book state
 - A multi-threaded gateway, matcher, and publisher pipeline over lock-free rings, with journal writes on an I/O thread
 - An interactive command line, and scripted scenarios with golden transcripts for each matching rule
+- A FIX 4.2 order-entry gateway over TCP, with a client for interactive trading and latency measurement
 - An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
 - Deterministic benchmark/demo scenarios
 
@@ -212,7 +213,10 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   │   ├── config.hpp
 │   │   ├── file_io.hpp
 │   │   ├── order_index.hpp
+│   │   ├── socket.hpp
 │   │   └── spin.hpp
+│   ├── fix.hpp
+│   ├── fix_gateway.hpp
 │   ├── journal.hpp
 │   ├── latency_histogram.hpp
 │   ├── market_data.hpp
@@ -227,6 +231,8 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── cli.cpp
 │   ├── codec.cpp
 │   ├── file_io.cpp
+│   ├── fix.cpp
+│   ├── fix_gateway.cpp
 │   ├── formatting.cpp
 │   ├── journal.cpp
 │   ├── market_data.cpp
@@ -234,7 +240,8 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── order_book.cpp
 │   ├── pipeline.cpp
 │   ├── simulator.cpp
-│   └── snapshot.cpp
+│   ├── snapshot.cpp
+│   └── socket.cpp
 ├── bench/
 │   ├── baseline/
 │   │   ├── map_order_book.cpp
@@ -250,6 +257,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── bench_tests.cpp
 │   ├── cli_tests.cpp
 │   ├── differential_tests.cpp
+│   ├── fix_tests.cpp
 │   ├── journal_tests.cpp
 │   ├── market_data_tests.cpp
 │   ├── order_book_tests.cpp
@@ -262,6 +270,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │       ├── differential.hpp
 │       └── reference_book.hpp
 ├── fuzz/
+│   ├── fix_fuzzer.cpp
 │   ├── journal_fuzzer.cpp
 │   ├── order_book_fuzzer.cpp
 │   └── standalone_main.cpp
@@ -270,6 +279,8 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 └── tools/
     ├── cli_main.cpp
     ├── demo_main.cpp
+    ├── fix_client_main.cpp
+    ├── fix_gateway_main.cpp
     ├── replay_main.cpp
     └── tui_main.cpp
 ```
@@ -569,6 +580,50 @@ make pipeline-benchmark                                          # 1M requests/s
 ./build/tradematch_pipeline_benchmark                            # unpaced: maximum throughput
 ```
 
+## FIX Gateway
+
+`tradematch_fix_gateway` puts the engine on the network as a FIX 4.2 order-entry server. One thread runs every session over non-blocking sockets with `poll()` (`WSAPoll` on Windows).
+
+```text
+$ ./build/tradematch_fix_gateway --port 9878 --symbols ACME,GLOBEX
+FIX 4.2 gateway listening on 127.0.0.1:9878 as TRADEMATCH, symbols ACME GLOBEX
+
+$ ./build/tradematch_fix_client --port 9878 --sender BOB
+logged on to 127.0.0.1:9878 as BOB.
+buy ACME 60 @ 100.50
+-> C1 buy ACME 60 @ 100.50
+<- C1 NEW BUY 60 ACME, open 60
+<- C1 FILLED 60 @ 100.50, filled 60, open 0, average 100.5000
+```
+
+| Layer | Supported |
+| --- | --- |
+| Session | Logon, which must name the gateway's CompID as TargetCompID and give a HeartBtInt, one session per CompID at a time; in-order sequence numbers (a gap ends the session, since resend requests aren't supported); Heartbeat and TestRequest; heartbeats on idle sessions; dropping sessions that go silent; Logout |
+| Orders | NewOrderSingle: limit, market, stop, and stop-limit orders; TimeInForce Day, GTC, IOC, and FOK; ExecInst 6 for post-only; MaxFloor for icebergs. OrderCancelRequest. OrderCancelReplaceRequest, where OrderQty is the new total including fills |
+| Reports | ExecutionReports for acknowledgements, partial fills, and fills (LastShares, LastPx, CumQty, LeavesQty, AvgPx), sent to both sides of every trade on whichever session each is; cancels and replaces; rejects with an OrdRejReason; OrderCancelReject; and session-level Rejects that name the offending tag. Reason codes are FIX 4.2's own, so strict clients such as QuickFIX accept them |
+
+**Design.** The protocol and the order handling live in `GatewayCore`, which takes the bytes a session received and produces the messages to send, with no sockets involved. `Gateway` only moves bytes between the sockets and the core. That split lets the tests run complete multi-session conversations without a network, and lets a fuzzer drive the gateway directly. The codec validates the whole framing: BeginString, BodyLength, MsgType as the first field, tag=value pairs, and the CheckSum. Orders belong to the CompID that sent them rather than to a connection: a disconnect leaves them in the book, and after logging back on the client can cancel or replace them by ClOrdID. Fill reports for a CompID that isn't connected are lost, since resending isn't supported.
+
+**Latency.** `tradematch_fix_client --bench N` starts a gateway in-process and sends orders one at a time, timing each from sending it to receiving its acknowledgement over loopback TCP. It then repeats the exchange as raw bytes of the same sizes, with an echo thread polling its socket in place of the gateway, to measure the floor the operating system sets. On the M4:
+
+```text
+FIX round trips: 100000 NewOrderSingle messages, each timed from sending it to receiving its ExecutionReport over loopback TCP (in-process gateway)
+  p50 54.5 us  p90 59.1 us  p99 86.5 us  p99.9 172.0 us  max 283.4 us
+  17912 orders per second, one at a time
+Loopback floor: the same exchange as raw bytes (134 out, 166 back) with an echo thread in place of the gateway
+  p50 48.4 us  p90 50.9 us  p99 73.2 us  p99.9 139.3 us  max 202.4 us
+```
+
+Almost all of the round trip is the kernel delivering the bytes and waking each thread in turn. Parsing the order, matching it, and encoding and parsing the report add about 6 us at the median, of which the matching takes about 20 ns.
+
+**Tests.** [tests/fix_tests.cpp](tests/fix_tests.cpp) checks the encoding against a message with an independently computed BodyLength and CheckSum, that every prefix of a message reads as incomplete, and nine kinds of broken framing. It walks the session rules (logon, heartbeats, the logon and silence timeouts, sequence gaps, duplicate CompIDs, garbled input, unsupported messages, missing tags) and the order flow: trades between sessions with fill reports on both sides, replace and cancel by OrigClOrdID, IOC, FOK, and market remainders, icebergs filling tranche by tranche, stops reporting to their owner, and every validation an order, replace, or cancel can fail, including ClOrdIDs already in use. A client that disconnects finds its order still trading and still its own when it logs back on. Over real TCP, two clients trade through a gateway running on its own thread, another drives a gateway with `poll_once()` from its own loop, and a port that is being listened on can't be taken over (on Windows that takes `SO_EXCLUSIVEADDRUSE`, as `SO_REUSEADDR` would allow it). A third fuzz target feeds the gateway arbitrary bytes, and arbitrary well-formed messages from two logged-on sessions.
+
+```bash
+./build/tradematch_fix_gateway --port 9878            # serve until Ctrl+C
+./build/tradematch_fix_client --port 9878 --sender ME  # an interactive order ticket
+./build/tradematch_fix_client --bench 100000           # round-trip latency, and the loopback floor beneath it
+```
+
 ## Example Workflow
 
 The demo executable (`./build/tradematch_demo`) walks through a deterministic scenario:
@@ -696,12 +751,14 @@ CI runs every suite under ThreadSanitizer as well. Weakening the ring's release 
 
 The command line has its [scenarios](#command-line), checked against golden transcripts, and its own suite ([tests/cli_tests.cpp](tests/cli_tests.cpp)). That suite journals, saves, and loads a session (the journal replays to the same state hash, and IDs continue after a load). It also feeds the interpreter 50,000 random lines built from its own vocabulary and malformed numbers: each must produce output or an error, never an exception or a crash.
 
+The FIX gateway's suite ([tests/fix_tests.cpp](tests/fix_tests.cpp)) is described [with the gateway](#fix-gateway).
+
 ## Differential Testing and Fuzzing
 
 Hand-written scenarios only cover the cases someone thought of. To catch the rest, the engine is checked against a second, deliberately naive implementation ([tests/support/reference_book.hpp](tests/support/reference_book.hpp)). The reference keeps every resting order in one flat vector and finds the best match with a linear scan, so it is slow but easy to verify by reading.
 
 - **Randomized differential test** (`tradematch_differential_tests`): runs 400,000 adversarial operations (200 seeds x 2,000) through both books. The flow uses a narrow price band so orders constantly cross, small sizes so partial fills are common, and a steady stream of invalid, duplicate, and unknown-ID requests. After every operation it compares result flags, quantities, every trade field, the full depth snapshot including FIFO order IDs, and order lookups. Every 89 operations, the engine is also replaced by a brand-new book restored from a binary snapshot of its own state, while the reference carries on untouched, so any state a snapshot fails to capture shows up as a later mismatch. A failure prints the seed, the diverging operation, and a one-line reproduction command.
-- **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow, including snapshot restores, and aborts on the first engine/reference mismatch. A second target ([fuzz/journal_fuzzer.cpp](fuzz/journal_fuzzer.cpp)) feeds arbitrary bytes to everything that reads persisted data: raw journal files, fuzzed commands framed with valid checksums and replayed into an engine, and fuzzed snapshot contents restored into one. Malformed input must be rejected cleanly, and anything accepted must round-trip exactly. CI fuzzes both for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps the targets compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
+- **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow, including snapshot restores, and aborts on the first engine/reference mismatch. A second target ([fuzz/journal_fuzzer.cpp](fuzz/journal_fuzzer.cpp)) feeds arbitrary bytes to everything that reads persisted data: raw journal files, fuzzed commands framed with valid checksums and replayed into an engine, and fuzzed snapshot contents restored into one. Malformed input must be rejected cleanly, and anything accepted must round-trip exactly. A third target ([fuzz/fix_fuzzer.cpp](fuzz/fix_fuzzer.cpp)) does the same for the [FIX gateway](#fix-gateway). CI fuzzes all three for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps every target compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
 
 The random flow covers call auctions (opened about every 150 operations and uncrossed about 30 later), every time-in-force and post-only combination, stop and stop-limit orders around the trading band, icebergs, and orders from a small pool of owners with random self-trade prevention modes. The reference book shares none of the engine's algorithms. For example, its FOK check simply runs the real match on a throwaway copy of the whole book, which checks the engine's single-pass FOK walk against the real matching path. During call phases, the indicative auction price and volumes are compared after every operation, and the engine's two-pointer equilibrium search is checked against a full scan of the book at every candidate price. Half of all replacements target an order's current price with the same or a smaller size, to exercise in-place amends, and end-of-day expiries are interleaved, with the expired ID lists compared.
 
@@ -735,9 +792,10 @@ make fuzz-long   # 10M-operation soak: 2,000 seeds x 5,000 operations
 
 # Coverage-guided fuzzing (LLVM clang on Linux)
 cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
-cmake --build build-fuzz --target tradematch_fuzzer tradematch_journal_fuzzer
+cmake --build build-fuzz --target tradematch_fuzzer tradematch_journal_fuzzer tradematch_fix_fuzzer
 ./build-fuzz/tradematch_fuzzer -max_total_time=60
 ./build-fuzz/tradematch_journal_fuzzer -max_total_time=60
+./build-fuzz/tradematch_fix_fuzzer -max_total_time=60
 ```
 
 ## Performance
@@ -813,15 +871,16 @@ Every push runs two workflows:
 | CI | Smoke tests | Every scenario's transcript matches its golden file. `tradematch_benchmark` and `tradematch_pipeline_benchmark` run short workloads, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform. The pipeline benchmark also checks its book against a single-threaded replay |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
-| Fuzz | libFuzzer | Two targets, order flow and journal/snapshot decoding, fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
+| Fuzz | libFuzzer | Three targets (order flow, journal and snapshot decoding, and the FIX gateway) fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
 
 ## Why This Project Matters
 
 For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It shows the ability to take a compact but failure-prone codebase and turn it into a cleaner, testable engine with explicit trade-offs, measurable behavior, and documentation that matches reality.
 
-It is also a strong stepping stone for deeper systems work: network gateways in front of the pipeline, or replaying real exchange feeds.
+It is also a strong stepping stone for deeper systems work: replaying real exchange feeds, or putting the FIX gateway in front of the multi-threaded pipeline.
 
 ## Future Improvements
 
-- A FIX gateway and a NASDAQ ITCH replay tool
+- A NASDAQ ITCH replay tool
+- FIX resend requests and sequence numbers that persist across reconnects
 - WebAssembly and Python front ends

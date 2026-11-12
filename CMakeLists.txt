@@ -48,6 +48,8 @@ set(TRADEMATCH_ENGINE_SOURCES
     src/cli.cpp
     src/codec.cpp
     src/file_io.cpp
+    src/fix.cpp
+    src/fix_gateway.cpp
     src/formatting.cpp
     src/journal.cpp
     src/market_data.cpp
@@ -55,6 +57,7 @@ set(TRADEMATCH_ENGINE_SOURCES
     src/order_book.cpp
     src/pipeline.cpp
     src/snapshot.cpp
+    src/socket.cpp
 )
 
 find_package(Threads REQUIRED)
@@ -62,6 +65,9 @@ find_package(Threads REQUIRED)
 add_library(tradematch_engine ${TRADEMATCH_ENGINE_SOURCES})
 target_include_directories(tradematch_engine PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(tradematch_engine PUBLIC Threads::Threads PRIVATE tradematch_project_options)
+if(WIN32)
+    target_link_libraries(tradematch_engine PUBLIC ws2_32)
+endif()
 
 add_library(tradematch_sim src/simulator.cpp)
 target_link_libraries(tradematch_sim PUBLIC tradematch_engine PRIVATE tradematch_project_options)
@@ -71,6 +77,12 @@ target_compile_options(tradematch_sim PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-
 
 add_executable(tradematch_tui tools/tui_main.cpp)
 target_link_libraries(tradematch_tui PRIVATE tradematch_sim tradematch_project_options)
+
+add_executable(tradematch_fix_gateway tools/fix_gateway_main.cpp)
+target_link_libraries(tradematch_fix_gateway PRIVATE tradematch_engine tradematch_project_options)
+
+add_executable(tradematch_fix_client tools/fix_client_main.cpp)
+target_link_libraries(tradematch_fix_client PRIVATE tradematch_engine tradematch_project_options)
 
 add_executable(tradematch_cli tools/cli_main.cpp)
 target_link_libraries(tradematch_cli PRIVATE tradematch_engine tradematch_project_options)
@@ -118,6 +130,10 @@ if(BUILD_TESTING)
              COMMAND ${CMAKE_COMMAND} -DTUI=$<TARGET_FILE:tradematch_tui> -DREPLAY=$<TARGET_FILE:tradematch_replay>
                      -DJOURNAL=${CMAKE_CURRENT_BINARY_DIR}/replay_roundtrip.tmj -P ${PROJECT_SOURCE_DIR}/cmake/replay_roundtrip.cmake)
 
+    add_executable(tradematch_fix_tests tests/fix_tests.cpp)
+    target_link_libraries(tradematch_fix_tests PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_fix_tests COMMAND tradematch_fix_tests)
+
     add_executable(tradematch_cli_tests tests/cli_tests.cpp)
     target_link_libraries(tradematch_cli_tests PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_cli_tests COMMAND tradematch_cli_tests)
@@ -153,6 +169,12 @@ if(BUILD_TESTING)
     target_link_libraries(tradematch_journal_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_journal_fuzz_smoke COMMAND tradematch_journal_fuzz_standalone --iterations 3000)
 
+    add_executable(tradematch_fix_fuzz_standalone fuzz/fix_fuzzer.cpp fuzz/standalone_main.cpp)
+    target_link_libraries(tradematch_fix_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_fix_fuzz_smoke COMMAND tradematch_fix_fuzz_standalone --iterations 3000)
+    # Order round trips over loopback TCP against an in-process gateway.
+    add_test(NAME tradematch_fix_client_bench_smoke COMMAND tradematch_fix_client --bench 2000)
+
     add_executable(tradematch_bench_tests tests/bench_tests.cpp)
     target_link_libraries(tradematch_bench_tests PRIVATE tradematch_bench_support tradematch_project_options)
     add_test(NAME tradematch_bench_tests COMMAND tradematch_bench_tests)
@@ -187,4 +209,8 @@ if(TRADEMATCH_LIBFUZZER)
     endfunction()
     tradematch_add_fuzzer(tradematch_fuzzer fuzz/order_book_fuzzer.cpp)
     tradematch_add_fuzzer(tradematch_journal_fuzzer fuzz/journal_fuzzer.cpp)
+    tradematch_add_fuzzer(tradematch_fix_fuzzer fuzz/fix_fuzzer.cpp)
+    if(WIN32)
+        target_link_libraries(tradematch_fuzzer PRIVATE ws2_32)
+    endif()
 endif()

@@ -98,31 +98,12 @@ T parse_bounded(std::string_view token, std::string_view what) {
     return static_cast<T>(value);
 }
 
-// Decimal prices with at most two places: "100", "100.5", "100.50", "-1.25". One tick is 0.01.
-Price parse_price(std::string_view token) {
-    const bool negative = token.starts_with('-');
-    const std::string_view digits = negative ? token.substr(1) : token;
-    const auto point = digits.find('.');
-    const std::string_view whole = digits.substr(0, point);
-    const std::string_view fraction = point == std::string_view::npos ? std::string_view{} : digits.substr(point + 1);
-    const auto all_digits = [](std::string_view part) {
-        return std::ranges::all_of(part, [](unsigned char character) { return std::isdigit(character) != 0; });
-    };
-    if (whole.empty() || !all_digits(whole) || !all_digits(fraction) || fraction.size() > 2 ||
-        (point != std::string_view::npos && fraction.empty())) {
+Price parse_cli_price(std::string_view token) {
+    const auto price = parse_price(token);
+    if (!price) {
         throw UsageError("expected a price such as 100.25, got '" + std::string{token} + "'");
     }
-    constexpr auto kLargestWhole = (std::numeric_limits<Price>::max() - 99) / 100;
-    const auto units = parse_unsigned(whole, "price");
-    if (units > static_cast<std::uint64_t>(kLargestWhole)) {
-        throw UsageError("the price " + std::string{token} + " is too large");
-    }
-    Price ticks = static_cast<Price>(units) * 100;
-    if (!fraction.empty()) {
-        const auto cents = static_cast<Price>(parse_unsigned(fraction, "price"));
-        ticks += fraction.size() == 1 ? cents * 10 : cents;
-    }
-    return negative ? -ticks : ticks;
+    return *price;
 }
 
 TimeInForce parse_time_in_force(std::string_view text) {
@@ -513,16 +494,16 @@ void CommandInterpreter::order(Side side, Tokens& args, bool stop) {
             throw UsageError("stop orders need '@ STOP_PRICE'");
         }
         request.type = OrderType::Stop;
-        request.stop_price = parse_price(price_token());
+        request.stop_price = parse_cli_price(price_token());
         if (next < args.size() && lower(args[next]) == "limit") {
             ++next;
             request.type = OrderType::StopLimit;
-            request.price = parse_price(price_token());
+            request.price = parse_cli_price(price_token());
         }
     } else if (has_at) {
         const std::string& token = price_token();
         request.type = lower(token) == "market" ? OrderType::Market : OrderType::Limit;
-        request.price = request.type == OrderType::Market ? 0 : parse_price(token);
+        request.price = request.type == OrderType::Market ? 0 : parse_cli_price(token);
     } else {
         request.type = OrderType::Market;  // no price, or the word market
         if (next < args.size() && lower(args[next]) == "market") {
@@ -572,7 +553,7 @@ void CommandInterpreter::replace(Tokens& args) {
     request.side = existing ? existing->side : Side::Buy;
     request.type = OrderType::Limit;
     request.quantity = parse_bounded<Quantity>(args[1], "quantity");
-    request.price = parse_price(args[3]);
+    request.price = parse_cli_price(args[3]);
     request.time_in_force =
         options.time_in_force.value_or(existing ? existing->time_in_force : TimeInForce::GoodTillCancel);
     request.post_only = options.post_only;
