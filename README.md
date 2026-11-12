@@ -4,10 +4,11 @@
 [![Fuzz](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml)
 [![Playground](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/playground.yml/badge.svg?branch=main)](https://adriantrill.github.io/TradeMatch-Engine/)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
+![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-TradeMatch Engine is a compact C++ order matching engine built to demonstrate the core mechanics behind a price-time-priority exchange book. The project focuses on the matching loop itself: deterministic order handling, clean data structures, strong tests, and a repository layout that is easy to inspect.
+TradeMatch Engine is a price-time-priority order matching engine in C++20, with the exchange infrastructure around it. The matching core handles limit, market, stop, iceberg, and post-only orders, every common time in force, self-trade prevention, and opening and closing call auctions, at about 50 million operations a second on one core, without a single heap allocation on the request path. Around it are a crash-safe journal, a multi-threaded pipeline, a FIX 4.2 gateway, NASDAQ ITCH 5.0 publishing and replay checked against a full day of real NASDAQ data, an agent-based market simulator with a live terminal UI, a WebAssembly playground, and Python bindings with a market microstructure notebook. Every rule is tested against an independent reference model and fuzzed, on Linux, macOS, and Windows.
 
 Prices are represented as integer ticks rather than floating-point values. In the demo and tests, one tick equals one cent.
 
@@ -15,6 +16,22 @@ Prices are represented as integer ticks rather than floating-point values. In th
   <img src="docs/assets/tui.gif" width="857" alt="The TradeMatch terminal UI: a live order book with depth bars, a trade tape, and one-second candles, as an agent-based market moves from the opening call auction into continuous trading">
 </p>
 <p align="center"><em>The <a href="#live-market-simulator">live market simulator</a>: trading agents on the engine, from the opening call auction into continuous trading (<code>make tui</code>).</em></p>
+
+## Highlights
+
+| | |
+| --- | --- |
+| **[Matching core](#matching-rules)** | Price-time priority with stops, icebergs, post-only orders, IOC, FOK, and DAY orders, self-trade prevention, and call auctions. No heap allocations per request: about 50 million operations a second, 19 ns on average, and 209 ns at the 99.99th percentile on an Apple M4 ([details](#performance)) |
+| **[Browser playground](#try-it-in-your-browser)** | The simulator and the command line compiled to WebAssembly and [live on GitHub Pages](https://adriantrill.github.io/TradeMatch-Engine/) |
+| **[NASDAQ ITCH 5.0](#nasdaq-itch-50)** | Publishes the books as NASDAQ's binary feed, and rebuilds books from NASDAQ's own files: a full day of NASDAQ BX, 29 million messages, in about two seconds, with no anomalies |
+| **[Python and market microstructure](#python-and-market-microstructure)** | pybind11 bindings for the book, the simulator, and ITCH replay, and a notebook that measures the simulator against a real day of NASDAQ data |
+| **[FIX 4.2 gateway](#fix-gateway)** | Order entry over TCP, with an interactive client and a latency benchmark that measures the loopback floor beneath each round trip |
+| **[Market simulator and terminal UI](#live-market-simulator)** | Market makers, noise traders, momentum traders, and a whale, trading through opening auctions, continuous sessions, and closing auctions |
+| **[Journal and recovery](#journal-snapshots-and-replay)** | A CRC-checked write-ahead journal of about 20 bytes per order, atomic snapshots, and replay to an identical state hash |
+| **[Multi-threaded pipeline](#multi-threaded-pipeline)** | Gateway, matcher, and publisher threads over lock-free rings: about 10 million requests a second end to end |
+| **[Testing](#differential-testing-and-fuzzing)** | Differential testing against a reference book, four libFuzzer targets, sanitizers, golden transcripts for every rule, and 97% line coverage, on [every push](#continuous-integration) |
+
+**Contents:** [Supported behavior](#supported-behavior) · [API](#api-overview) · [Matching rules](#matching-rules) · [System design](#system-design) · [Layout](#repository-layout) · [Build](#build) · [Run](#run) · [Command line](#command-line) · [Simulator](#live-market-simulator) · [Journal](#journal-snapshots-and-replay) · [Pipeline](#multi-threaded-pipeline) · [FIX](#fix-gateway) · [ITCH](#nasdaq-itch-50) · [Python](#python-and-market-microstructure) · [Tests](#tests-included) · [Fuzzing](#differential-testing-and-fuzzing) · [Performance](#performance) · [CI](#continuous-integration)
 
 ## Try It in Your Browser
 
@@ -72,6 +89,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - A FIX 4.2 order-entry gateway over TCP, with a client for interactive trading and latency measurement
 - An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
 - A browser playground: the simulator and the command line compiled to WebAssembly, deployed to GitHub Pages
+- Python bindings for the book, the simulator, and ITCH replay, with a market microstructure notebook
 - Deterministic benchmark/demo scenarios
 
 ## API Overview
@@ -169,6 +187,29 @@ The engine follows standard price-time priority:
 - Aggregated quantities (price-level totals) are 64-bit, so they never overflow even when many large orders share a level.
 
 ## System Design
+
+Everything is built around one engine: orders arrive through any of several front ends, and two listener interfaces carry what happens in the books to market data consumers, aggregated by price level (L2) or order by order (L3).
+
+```mermaid
+flowchart LR
+    fix["FIX 4.2 gateway<br/>over TCP"] --> engine
+    cli["Command line and<br/>golden scenarios"] --> engine
+    pipeline["Pipeline threads:<br/>gateway, matcher, publisher"] --> engine
+    sim["Market simulator:<br/>trading agents"] --> engine
+    python["Python bindings"] --> engine
+
+    engine["MatchingEngine<br/>one OrderBook per symbol"]
+
+    engine -. "every command,<br/>when journaled" .-> journal[("Write-ahead journal<br/>and snapshots")]
+    journal -.-> recovery["Replay and recovery<br/>to an identical state hash"]
+    engine -- "L2: trades and<br/>level updates" --> feed["MarketDataFeed:<br/>depth, tape, candles"]
+    engine -- "L3: order events" --> publisher["ITCH 5.0 publisher"]
+    feed --> tui["Terminal UI"]
+    feed --> web["Browser playground<br/>in WebAssembly"]
+    publisher --> files[("ITCH files")]
+    nasdaq[("NASDAQ's ITCH files")] --> replica["BookReplica:<br/>books rebuilt order by order"]
+    files --> replica
+```
 
 The matching core is intentionally single-threaded. That keeps sequencing deterministic and makes the behavior straightforward to test. Concurrency can be layered around the engine later, but the matching path itself should stay simple and predictable.
 
@@ -1007,9 +1048,9 @@ Every push runs three workflows:
 
 ## Why This Project Matters
 
-For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It shows the ability to take a compact but failure-prone codebase and turn it into a cleaner, testable engine with explicit trade-offs, measurable behavior, and documentation that matches reality.
+For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It started as a compact but failure-prone matching engine, and grew one verified step at a time into an exchange in miniature: a faster engine with the order types real venues offer, the protocols they speak, their real market data, and the testing to trust all of it, with explicit trade-offs, measurable behavior, and documentation that matches reality.
 
-It is also a strong stepping stone for deeper systems work, such as putting the FIX gateway in front of the multi-threaded pipeline, or testing trading strategies against books rebuilt from real NASDAQ data.
+It is also a strong stepping stone for deeper systems work, such as putting the FIX gateway in front of the multi-threaded pipeline, or backtesting trading strategies from Python against books rebuilt from real NASDAQ data.
 
 ## Future Improvements
 
