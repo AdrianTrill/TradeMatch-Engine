@@ -1,0 +1,3 @@
+# Scenario scripts and their golden transcripts are compared byte for byte, so they keep LF line endings everywhere.
+tests/scenarios/* text eol=lf
+*.gif binary

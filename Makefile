@@ -6,13 +6,16 @@ DEPFLAGS = -MMD -MP
 BUILD_DIR ?= build
 OBJ_DIR := $(BUILD_DIR)/obj
 
-ENGINE_SRC := src/codec.cpp src/file_io.cpp src/formatting.cpp src/journal.cpp src/market_data.cpp \
+ENGINE_SRC := src/cli.cpp src/codec.cpp src/file_io.cpp src/formatting.cpp src/journal.cpp src/market_data.cpp \
 	src/matching_engine.cpp src/order_book.cpp src/pipeline.cpp src/snapshot.cpp
 ENGINE_OBJ := $(ENGINE_SRC:%.cpp=$(OBJ_DIR)/%.o)
 
 DEMO_BIN := $(BUILD_DIR)/tradematch_demo
 TUI_BIN := $(BUILD_DIR)/tradematch_tui
 REPLAY_BIN := $(BUILD_DIR)/tradematch_replay
+CLI_BIN := $(BUILD_DIR)/tradematch_cli
+CLI_TEST_BIN := $(BUILD_DIR)/tradematch_cli_tests
+SCENARIOS := $(wildcard tests/scenarios/*.tm)
 SIM_TEST_BIN := $(BUILD_DIR)/tradematch_simulator_tests
 JOURNAL_TEST_BIN := $(BUILD_DIR)/tradematch_journal_tests
 JOURNAL_FUZZ_BIN := $(BUILD_DIR)/tradematch_journal_fuzz_standalone
@@ -45,6 +48,8 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tools/demo_main.o \
 	$(OBJ_DIR)/tools/tui_main.o \
 	$(OBJ_DIR)/tools/replay_main.o \
+	$(OBJ_DIR)/tools/cli_main.o \
+	$(OBJ_DIR)/tests/cli_tests.o \
 	$(OBJ_DIR)/src/simulator.o \
 	$(OBJ_DIR)/tests/simulator_tests.o \
 	$(OBJ_DIR)/tests/journal_tests.o \
@@ -63,10 +68,10 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/fuzz/journal_fuzzer.o \
 	$(OBJ_DIR)/fuzz/standalone_main.o
 
-.PHONY: all test demo tui replay-demo benchmark pipeline-benchmark fuzz-long format format-check lint sanitize tsan \
-	coverage cmake-configure cmake-build clean
+.PHONY: all test demo tui cli scenarios replay-demo benchmark pipeline-benchmark fuzz-long format format-check lint \
+	sanitize tsan coverage cmake-configure cmake-build clean
 
-all: $(DEMO_BIN) $(TUI_BIN) $(REPLAY_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) $(BENCH_BIN) \
+all: $(DEMO_BIN) $(TUI_BIN) $(REPLAY_BIN) $(CLI_BIN) $(CLI_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) $(BENCH_BIN) \
 	$(PIPELINE_BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
 	$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
 
@@ -89,6 +94,12 @@ $(SIM_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tests/simul
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(REPLAY_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/replay_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(CLI_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/cli_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(CLI_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/cli_tests.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(JOURNAL_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tests/journal_tests.o
@@ -130,8 +141,10 @@ $(JOURNAL_FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/journal_fuzzer.o $(OBJ_DIR)/f
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
-		$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) replay-demo
+		$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) \
+		$(CLI_TEST_BIN) replay-demo scenarios
 	./$(TEST_BIN)
+	./$(CLI_TEST_BIN)
 	./$(SIM_TEST_BIN)
 	./$(JOURNAL_TEST_BIN)
 	./$(PIPELINE_TEST_BIN)
@@ -160,6 +173,14 @@ demo: $(DEMO_BIN)
 
 tui: $(TUI_BIN)
 	./$(TUI_BIN)
+
+cli: $(CLI_BIN)
+	./$(CLI_BIN)
+
+# Every scenario's transcript must match its golden .expected file. After an intended change, regenerate them with
+# ./build/tradematch_cli --update tests/scenarios/*.tm and review the diff.
+scenarios: $(CLI_BIN)
+	./$(CLI_BIN) --check $(SCENARIOS)
 
 benchmark: $(BENCH_BIN)
 	./$(BENCH_BIN)

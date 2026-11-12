@@ -239,6 +239,11 @@ public:
         now_ = timestamp;
     }
 
+    // Starts (or, with nullptr, stops) journaling the commands that follow.
+    void set_journal(JournalWriter* journal) noexcept {
+        journal_ = journal;
+    }
+
     Timestamp time() const noexcept {
         return now_;
     }

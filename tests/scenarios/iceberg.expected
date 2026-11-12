@@ -1,0 +1,37 @@
+# Icebergs show one tranche at a time; the rest stays hidden. Each new tranche joins the back of the queue, so the
+# hidden part never jumps ahead of orders that were displayed first.
+> add ACME
+added ACME
+> sell 300 @ 100.00 display=100
+ACME #1 SELL 300 @ 100.00 display 100 -> resting 300
+> sell 50 @ 100.00
+ACME #2 SELL 50 @ 100.00 -> resting 50
+> book
+ACME  CONTINUOUS  last -  resting 2
+              BID                       ASK
+                               100.00 x 150     (2)
+> order 1
+ACME #1 SELL 300 @ 100.00 GTC, sequence 1, iceberg showing 100 (tranches of 100)
+
+# The buy fills the visible tranche of order 1. Its next tranche goes behind order 2, which fills next.
+> buy 120 @ 100.00
+ACME #3 BUY 120 @ 100.00 -> filled 120
+  trade #1  100 @ 100.00  buy #3  sell #1
+  trade #2  20 @ 100.00  buy #3  sell #2
+> book
+ACME  CONTINUOUS  last 100.00  resting 2
+              BID                       ASK
+                               100.00 x 130     (2)
+> order 1
+ACME #1 SELL 200 @ 100.00 GTC, sequence 4, iceberg showing 100 (tranches of 100)
+
+# Order 2's last 30, then order 1's last two tranches. The unfilled 20 rests.
+> buy 250 @ 100.00
+ACME #4 BUY 250 @ 100.00 -> filled 230, resting 20
+  trade #3  30 @ 100.00  buy #4  sell #2
+  trade #4  100 @ 100.00  buy #4  sell #1
+  trade #5  100 @ 100.00  buy #4  sell #1
+> book
+ACME  CONTINUOUS  last 100.00  resting 1
+              BID                       ASK
+     100.00 x 20      (1)

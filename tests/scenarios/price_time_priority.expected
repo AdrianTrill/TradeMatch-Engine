@@ -1,0 +1,30 @@
+# Price-time priority: better prices trade first, and at the same price, earlier orders trade first.
+> add ACME
+added ACME
+> buy 100 @ 100.00
+ACME #1 BUY 100 @ 100.00 -> resting 100
+> buy 50 @ 100.00
+ACME #2 BUY 50 @ 100.00 -> resting 50
+> buy 70 @ 100.25
+ACME #3 BUY 70 @ 100.25 -> resting 70
+> book
+ACME  CONTINUOUS  last -  resting 3
+              BID                       ASK
+     100.25 x 70      (1)
+     100.00 x 150     (2)
+
+# A sell for 200 takes the best bid at 100.25 first, then the two bids at 100.00 in the order they arrived.
+# Every trade happens at the resting order's price.
+> sell 200 @ 99.50
+ACME #4 SELL 200 @ 99.50 -> filled 200
+  trade #1  70 @ 100.25  buy #3  sell #4
+  trade #2  100 @ 100.00  buy #1  sell #4
+  trade #3  30 @ 100.00  buy #2  sell #4
+> book
+ACME  CONTINUOUS  last 100.00  resting 1
+              BID                       ASK
+     100.00 x 20      (1)
+> trades
+  trade #3  30 @ 100.00  buy #2  sell #4
+  trade #2  100 @ 100.00  buy #1  sell #4
+  trade #1  70 @ 100.25  buy #3  sell #4

@@ -1,0 +1,42 @@
+# Stop orders wait until the last trade reaches their stop price, then become market orders, or limit orders for
+# stop-limits.
+> add ACME
+added ACME
+> sell 100 @ 101.00
+ACME #1 SELL 100 @ 101.00 -> resting 100
+> sell 100 @ 102.00
+ACME #2 SELL 100 @ 102.00 -> resting 100
+> buy 100 @ 99.00
+ACME #3 BUY 100 @ 99.00 -> resting 100
+> stop buy 50 @ 101.00
+ACME #4 STOP BUY 50 @ 101.00 -> waiting for a trade at 101.00
+> stop sell 30 @ 99.50 limit 99.00
+ACME #5 STOP-LIMIT SELL 30 @ 99.50 limit 99.00 -> waiting for a trade at 99.50
+> book
+ACME  CONTINUOUS  last -  resting 3  stops 2
+              BID                       ASK
+      99.00 x 100     (1)      101.00 x 100     (1)
+                               102.00 x 100     (1)
+
+# A trade at 101.00 triggers the buy stop. It buys 50 at market: 40 more at 101.00, then 10 at 102.00.
+> buy 60 @ 101.00
+ACME #6 BUY 60 @ 101.00 -> filled 60
+  trade #1  60 @ 101.00  buy #6  sell #1
+  trade #2  40 @ 101.00  buy #4  sell #1
+  trade #3  10 @ 102.00  buy #4  sell #2
+  stop #4 triggered
+> book
+ACME  CONTINUOUS  last 102.00  resting 2  stops 1
+              BID                       ASK
+      99.00 x 100     (1)      102.00 x 90      (1)
+
+# A trade at 99.00 triggers the sell stop-limit, which sells 30 at 99.00 or better.
+> sell 10 @ 99.00
+ACME #7 SELL 10 @ 99.00 -> filled 10
+  trade #4  10 @ 99.00  buy #3  sell #7
+  trade #5  30 @ 99.00  buy #3  sell #5
+  stop #5 triggered
+> book
+ACME  CONTINUOUS  last 99.00  resting 2
+              BID                       ASK
+      99.00 x 60      (1)      102.00 x 90      (1)

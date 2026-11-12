@@ -1,0 +1,40 @@
+# Replacing an order. A smaller size at the same price is amended in place and keeps the order's place in the
+# queue. A larger size or a new price re-enters the order at the back.
+> add ACME
+added ACME
+> buy 100 @ 100.00
+ACME #1 BUY 100 @ 100.00 -> resting 100
+> buy 100 @ 100.00
+ACME #2 BUY 100 @ 100.00 -> resting 100
+
+# Order 1 shrinks to 60 and stays first in line, so the next sell trades with it.
+> replace 1 60 @ 100.00
+ACME #1 replace with 60 @ 100.00 -> amended in place, priority kept: resting 60
+> sell 60 @ 100.00
+ACME #3 SELL 60 @ 100.00 -> filled 60
+  trade #1  60 @ 100.00  buy #1  sell #3
+
+# Order 2 grows to 150, which sends it behind order 4.
+> buy 100 @ 100.00
+ACME #4 BUY 100 @ 100.00 -> resting 100
+> replace 2 150 @ 100.00
+ACME #2 replace with 150 @ 100.00 -> priority reset: resting 150
+> order 2
+ACME #2 BUY 150 @ 100.00 GTC, sequence 5
+> sell 100 @ 100.00
+ACME #5 SELL 100 @ 100.00 -> filled 100
+  trade #2  100 @ 100.00  buy #4  sell #5
+> book
+ACME  CONTINUOUS  last 100.00  resting 1
+              BID                       ASK
+     100.00 x 150     (1)
+
+# A new price also resets priority. Replacing an order that isn't there is rejected.
+> replace 2 150 @ 100.25
+ACME #2 replace with 150 @ 100.25 -> priority reset: resting 150
+> book
+ACME  CONTINUOUS  last 100.00  resting 1
+              BID                       ASK
+     100.25 x 150     (1)
+> replace 9 10 @ 100.00
+ACME #9 replace with 10 @ 100.00 -> rejected: UNKNOWN_ORDER

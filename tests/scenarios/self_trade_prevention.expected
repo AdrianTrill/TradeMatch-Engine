@@ -1,0 +1,41 @@
+# Self-trade prevention. When an incoming order would trade with a resting order from the same owner, the incoming
+# order's stp mode decides what happens.
+> add ACME
+added ACME
+> sell 50 @ 100.00 owner=7
+ACME #1 SELL 50 @ 100.00 owner 7 -> resting 50
+> sell 50 @ 100.10 owner=8
+ACME #2 SELL 50 @ 100.10 owner 8 -> resting 50
+
+# newest: the incoming order stops matching, and the rest of it is cancelled.
+> buy 80 @ 100.10 owner=7 stp=newest
+ACME #3 BUY 80 @ 100.10 owner 7 stp newest -> self-trade prevention cancelled the remaining 80
+
+# oldest: the resting orders are cancelled, and matching continues past them.
+> sell 50 @ 100.00 owner=7
+ACME #4 SELL 50 @ 100.00 owner 7 -> resting 50
+> buy 80 @ 100.10 owner=7 stp=oldest
+ACME #5 BUY 80 @ 100.10 owner 7 stp oldest -> filled 50, resting 30
+  trade #1  50 @ 100.10  buy #5  sell #2
+  self-trade prevention cancelled resting #1
+  self-trade prevention cancelled resting #4
+> book
+ACME  CONTINUOUS  last 100.10  resting 1
+              BID                       ASK
+     100.10 x 30      (1)
+
+# both: the resting order and the rest of the incoming order are both cancelled.
+> sell 20 @ 100.20 owner=7
+ACME #6 SELL 20 @ 100.20 owner 7 -> resting 20
+> buy 30 @ 100.20 owner=7 stp=both
+ACME #7 BUY 30 @ 100.20 owner 7 stp both -> self-trade prevention cancelled the remaining 30
+  self-trade prevention cancelled resting #6
+
+# none, the default: the owner trades with itself.
+> sell 10 @ 100.10 owner=7
+ACME #8 SELL 10 @ 100.10 owner 7 -> filled 10
+  trade #2  10 @ 100.10  buy #5  sell #8
+> book
+ACME  CONTINUOUS  last 100.10  resting 1
+              BID                       ASK
+     100.10 x 20      (1)

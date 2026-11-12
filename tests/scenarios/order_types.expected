@@ -1,0 +1,47 @@
+# Market orders, time in force, and post-only orders.
+> add ACME
+added ACME
+> sell 50 @ 101.00
+ACME #1 SELL 50 @ 101.00 -> resting 50
+> sell 50 @ 101.50
+ACME #2 SELL 50 @ 101.50 -> resting 50
+
+# A market order sweeps the book. Whatever it can't fill is cancelled rather than left resting.
+> buy 120 market
+ACME #3 BUY 120 @ market -> filled 100, cancelled the unfilled 20
+  trade #1  50 @ 101.00  buy #3  sell #1
+  trade #2  50 @ 101.50  buy #3  sell #2
+
+# IOC trades what it can at its limit and cancels the rest.
+> sell 50 @ 102.00
+ACME #4 SELL 50 @ 102.00 -> resting 50
+> buy 80 @ 102.00 ioc
+ACME #5 BUY 80 @ 102.00 IOC -> filled 50, cancelled the unfilled 30
+  trade #3  50 @ 102.00  buy #5  sell #4
+
+# FOK is all or nothing: 40 is more than the 30 offered, so nothing trades. 30 fills in full.
+> sell 30 @ 102.50
+ACME #6 SELL 30 @ 102.50 -> resting 30
+> buy 40 @ 102.50 fok
+ACME #7 BUY 40 @ 102.50 FOK -> killed: there wasn't enough to fill all 40
+> buy 30 @ 102.50 fok
+ACME #8 BUY 30 @ 102.50 FOK -> filled 30
+  trade #4  30 @ 102.50  buy #8  sell #6
+
+# Post-only orders must add liquidity: one that would trade is rejected instead.
+> sell 10 @ 103.00
+ACME #9 SELL 10 @ 103.00 -> resting 10
+> buy 10 @ 103.00 post-only
+ACME #10 BUY 10 @ 103.00 post-only -> rejected: POST_ONLY_WOULD_CROSS
+> buy 10 @ 102.75 post-only
+ACME #11 BUY 10 @ 102.75 post-only -> resting 10
+
+# DAY orders expire at the end of the day; GTC orders stay.
+> sell 20 @ 104.00 day
+ACME #12 SELL 20 @ 104.00 DAY -> resting 20
+> expire
+expired 1 day order: ACME #12
+> book
+ACME  CONTINUOUS  last 102.50  resting 2
+              BID                       ASK
+     102.75 x 10      (1)      103.00 x 10      (1)

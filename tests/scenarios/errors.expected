@@ -1,0 +1,37 @@
+# The engine validates every request, and the command line explains what it can't parse. Nothing changes either way.
+> buy 10 @ 100.00
+error: there are no symbols yet: try add ACME
+> add ACME
+added ACME
+
+# Rejected by the engine.
+> buy 0 @ 100.00
+ACME #1 BUY 0 @ 100.00 -> rejected: INVALID_QUANTITY
+> buy 10 @ 0
+ACME #2 BUY 10 @ 0.00 -> rejected: INVALID_PRICE
+> sell 10 @ 100.00 display=20
+ACME #3 SELL 10 @ 100.00 display 20 -> rejected: INVALID_DISPLAY_QUANTITY
+> buy 10 market post-only
+ACME #4 BUY 10 @ market post-only -> rejected: INVALID_POST_ONLY
+> cancel 42
+ACME #42 cancel rejected: UNKNOWN_ORDER
+> buy 10 @ 100.00 id=5
+ACME #5 BUY 10 @ 100.00 -> resting 10
+> buy 10 @ 100.00 id=5
+ACME #5 BUY 10 @ 100.00 -> rejected: DUPLICATE_ORDER_ID
+
+# Rejected by the command line.
+> buy 10 @ 100.001
+error: expected a price such as 100.25, got '100.001'
+> stop buy 10
+error: stop orders need '@ STOP_PRICE'
+> frobnicate
+error: unknown command 'frobnicate' (try help)
+> buy 10 @ 100.00 color=red
+error: unknown option 'color'
+> book GLOBEX
+error: unknown symbol GLOBEX (add it first)
+> book
+ACME  CONTINUOUS  last -  resting 1
+              BID                       ASK
+     100.00 x 10      (1)

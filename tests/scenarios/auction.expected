@@ -1,0 +1,42 @@
+# A call auction collects orders without matching them, then trades everything that crosses at a single price: the
+# one that matches the most volume, then leaves the smallest surplus, then follows the side with the surplus.
+> add ACME
+added ACME
+> auction begin
+ACME call auction started: orders collect without matching
+> buy 100 @ 100.30
+ACME #1 BUY 100 @ 100.30 -> resting 100
+> buy 50 @ 100.10
+ACME #2 BUY 50 @ 100.10 -> resting 50
+> sell 80 @ 99.90
+ACME #3 SELL 80 @ 99.90 -> resting 80
+> sell 60 @ 100.20
+ACME #4 SELL 60 @ 100.20 -> resting 60
+
+# The book may cross during the call. The indicative price shows what an uncross would do right now.
+> book
+ACME  AUCTION  last -  resting 4  indicative 100.20 x 100
+              BID                       ASK
+     100.30 x 100     (1)       99.90 x 80      (1)
+     100.10 x 50      (1)      100.20 x 60      (1)
+> auction show
+ACME would uncross at 100.20: 100 matched, buy surplus 0, sell surplus 40
+
+# Market orders take part with the highest priority.
+> buy 40 market
+ACME #5 BUY 40 @ market -> queued for the auction
+> auction show
+ACME would uncross at 100.20: 140 matched, buy surplus 0, sell surplus 0
+> auction uncross
+ACME uncrossed at 100.20: 140 matched
+  trade #1  40 @ 100.20  buy #5  sell #3  (auction)
+  trade #2  40 @ 100.20  buy #1  sell #3  (auction)
+  trade #3  60 @ 100.20  buy #1  sell #4  (auction)
+> book
+ACME  CONTINUOUS  last 100.20  resting 1
+              BID                       ASK
+     100.10 x 50      (1)
+> trades
+  trade #3  60 @ 100.20  buy #1  sell #4  (auction)
+  trade #2  40 @ 100.20  buy #1  sell #3  (auction)
+  trade #1  40 @ 100.20  buy #5  sell #3  (auction)

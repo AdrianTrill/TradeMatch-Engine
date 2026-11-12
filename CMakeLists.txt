@@ -45,6 +45,7 @@ if(TRADEMATCH_COVERAGE)
 endif()
 
 set(TRADEMATCH_ENGINE_SOURCES
+    src/cli.cpp
     src/codec.cpp
     src/file_io.cpp
     src/formatting.cpp
@@ -70,6 +71,9 @@ target_compile_options(tradematch_sim PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-
 
 add_executable(tradematch_tui tools/tui_main.cpp)
 target_link_libraries(tradematch_tui PRIVATE tradematch_sim tradematch_project_options)
+
+add_executable(tradematch_cli tools/cli_main.cpp)
+target_link_libraries(tradematch_cli PRIVATE tradematch_engine tradematch_project_options)
 
 add_executable(tradematch_replay tools/replay_main.cpp)
 target_link_libraries(tradematch_replay PRIVATE tradematch_engine tradematch_project_options)
@@ -113,6 +117,17 @@ if(BUILD_TESTING)
     add_test(NAME tradematch_replay_roundtrip
              COMMAND ${CMAKE_COMMAND} -DTUI=$<TARGET_FILE:tradematch_tui> -DREPLAY=$<TARGET_FILE:tradematch_replay>
                      -DJOURNAL=${CMAKE_CURRENT_BINARY_DIR}/replay_roundtrip.tmj -P ${PROJECT_SOURCE_DIR}/cmake/replay_roundtrip.cmake)
+
+    add_executable(tradematch_cli_tests tests/cli_tests.cpp)
+    target_link_libraries(tradematch_cli_tests PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_cli_tests COMMAND tradematch_cli_tests)
+
+    # Each scenario script's transcript must match its golden .expected file exactly.
+    file(GLOB TRADEMATCH_SCENARIOS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/tests/scenarios/*.tm)
+    foreach(scenario IN LISTS TRADEMATCH_SCENARIOS)
+        get_filename_component(scenario_name ${scenario} NAME_WE)
+        add_test(NAME tradematch_scenario_${scenario_name} COMMAND tradematch_cli --check ${scenario})
+    endforeach()
 
     add_executable(tradematch_pipeline_tests tests/pipeline_tests.cpp)
     target_include_directories(tradematch_pipeline_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)

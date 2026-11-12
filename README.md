@@ -47,6 +47,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - A write-ahead journal of every command: CRC-32C-checked, about 20 bytes per order, and safe against torn writes
 - Atomic snapshots, recovery from a snapshot plus the journal tail, and a 64-bit hash of the complete book state
 - A multi-threaded gateway, matcher, and publisher pipeline over lock-free rings, with journal writes on an I/O thread
+- An interactive command line, and scripted scenarios with golden transcripts for each matching rule
 - An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
 - Deterministic benchmark/demo scenarios
 
@@ -205,6 +206,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── include/tradematch/
 │   ├── book_listener.hpp
 │   ├── book_state.hpp
+│   ├── cli.hpp
 │   ├── detail/
 │   │   ├── codec.hpp
 │   │   ├── config.hpp
@@ -222,6 +224,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── spsc_ring.hpp
 │   └── types.hpp
 ├── src/
+│   ├── cli.cpp
 │   ├── codec.cpp
 │   ├── file_io.cpp
 │   ├── formatting.cpp
@@ -245,12 +248,15 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── tests/
 │   ├── allocation_tests.cpp
 │   ├── bench_tests.cpp
+│   ├── cli_tests.cpp
 │   ├── differential_tests.cpp
 │   ├── journal_tests.cpp
 │   ├── market_data_tests.cpp
 │   ├── order_book_tests.cpp
 │   ├── order_index_tests.cpp
 │   ├── pipeline_tests.cpp
+│   ├── scenarios/
+│   │   └── *.tm, *.expected
 │   ├── simulator_tests.cpp
 │   └── support/
 │       ├── differential.hpp
@@ -262,6 +268,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── cmake/
 │   └── replay_roundtrip.cmake
 └── tools/
+    ├── cli_main.cpp
     ├── demo_main.cpp
     ├── replay_main.cpp
     └── tui_main.cpp
@@ -319,10 +326,11 @@ Demo:
 ./build/tradematch_demo
 ```
 
-Live market simulator (see [Live Market Simulator](#live-market-simulator)) and journal replay (see [Journal, Snapshots, and Replay](#journal-snapshots-and-replay)):
+Command line (see [Command Line](#command-line)), live market simulator (see [Live Market Simulator](#live-market-simulator)), and journal replay (see [Journal, Snapshots, and Replay](#journal-snapshots-and-replay)):
 
 ```bash
-make tui                                  # or ./build/tradematch_tui after a CMake build
+make cli                                  # or ./build/tradematch_cli after a CMake build
+make tui                                  # or ./build/tradematch_tui
 ./build/tradematch_tui --seed 42 --speed 4
 make replay-demo                          # record a session's journal, replay it, and compare state hashes
 ```
@@ -345,6 +353,70 @@ If you build with CMake instead:
 
 ```bash
 ctest --test-dir build --output-on-failure
+```
+
+## Command Line
+
+`tradematch_cli` is an interactive front end to the engine, with commands that read like order tickets:
+
+```text
+$ ./build/tradematch_cli
+TradeMatch command line. Type help for the commands, quit to leave.
+> add ACME
+added ACME
+> sell 300 @ 100.10 display=100
+ACME #1 SELL 300 @ 100.10 display 100 -> resting 300
+> sell 200 @ 100.25
+ACME #2 SELL 200 @ 100.25 -> resting 200
+> buy 150 @ 99.90
+ACME #3 BUY 150 @ 99.90 -> resting 150
+> stop buy 100 @ 100.25
+ACME #4 STOP BUY 100 @ 100.25 -> waiting for a trade at 100.25
+> buy 350 @ 100.25 ioc
+ACME #5 BUY 350 @ 100.25 IOC -> filled 350
+  trade #1  100 @ 100.10  buy #5  sell #1
+  trade #2  100 @ 100.10  buy #5  sell #1
+  trade #3  100 @ 100.10  buy #5  sell #1
+  trade #4  50 @ 100.25  buy #5  sell #2
+  trade #5  100 @ 100.25  buy #4  sell #2
+  stop #4 triggered
+> book
+ACME  CONTINUOUS  last 100.25  resting 2
+              BID                       ASK
+      99.90 x 150     (1)      100.25 x 50      (1)
+```
+
+| Command | Effect |
+| --- | --- |
+| `buy`/`sell [SYMBOL] QTY [@ PRICE \| market] [options]` | Submit a limit or market order |
+| `stop buy\|sell [SYMBOL] QTY @ STOP [limit PRICE] [options]` | Submit a stop or stop-limit order |
+| `cancel [SYMBOL] ID`, `replace [SYMBOL] ID QTY @ PRICE [options]` | Cancel or replace a resting order; a replace keeps the order's side, time in force, display size, and owner unless told otherwise |
+| `book [SYMBOL] [LEVELS]`, `order [SYMBOL] ID`, `trades [SYMBOL] [N]` | Show the depth, one resting order, or the latest trades |
+| `auction [SYMBOL] begin\|show\|uncross`, `expire` | Run a call auction, or the end-of-day expiry |
+| `add SYMBOL`, `use SYMBOL`, `symbols`, `hash` | Manage instruments; print the state hash |
+| `save FILE`, `load FILE`, `journal FILE` | Write or restore a snapshot; journal the session |
+
+Options are `gtc`, `day`, `ioc`, `fok`, `post-only`, `display=N` (iceberg), `owner=N`, `stp=none|newest|oldest|both`, and `id=N`. The symbol can be left out once one is selected, prices take at most two decimals, and order IDs are assigned automatically unless `id=` sets one.
+
+**Scenarios.** [tests/scenarios](tests/scenarios) holds a script for each part of the matching rules, together with its golden transcript:
+
+| Scenario | Shows |
+| --- | --- |
+| [price_time_priority](tests/scenarios/price_time_priority.expected) | Better prices first, then arrival order; trades at the resting price |
+| [order_types](tests/scenarios/order_types.expected) | Market sweeps, IOC, FOK, post-only, and DAY expiry |
+| [amend_priority](tests/scenarios/amend_priority.expected) | Amending in place keeps priority; a bigger size or a new price resets it |
+| [iceberg](tests/scenarios/iceberg.expected) | Tranches refreshing at the back of the queue |
+| [stops](tests/scenarios/stops.expected) | Stop and stop-limit orders triggering |
+| [self_trade_prevention](tests/scenarios/self_trade_prevention.expected) | All four modes |
+| [auction](tests/scenarios/auction.expected) | A call auction: crossed book, indicative price, market-order priority, and the uncross |
+| [errors](tests/scenarios/errors.expected) | Engine rejects and command line errors |
+
+CTest runs every script and compares its transcript with the golden file line by line, on every platform. After an intended change in behavior, `tradematch_cli --update tests/scenarios/*.tm` regenerates the transcripts so the diff can be reviewed.
+
+```bash
+make cli                                          # interactive session
+./build/tradematch_cli tests/scenarios/stops.tm   # print a scenario's transcript
+make scenarios                                    # check every scenario against its golden transcript
 ```
 
 ## Live Market Simulator
@@ -622,6 +694,8 @@ The pipeline suite ([tests/pipeline_tests.cpp](tests/pipeline_tests.cpp)) checks
 
 CI runs every suite under ThreadSanitizer as well. Weakening the ring's release store to a relaxed one makes it report a data race at once.
 
+The command line has its [scenarios](#command-line), checked against golden transcripts, and its own suite ([tests/cli_tests.cpp](tests/cli_tests.cpp)). That suite journals, saves, and loads a session (the journal replays to the same state hash, and IDs continue after a load). It also feeds the interpreter 50,000 random lines built from its own vocabulary and malformed numbers: each must produce output or an error, never an exception or a crash.
+
 ## Differential Testing and Fuzzing
 
 Hand-written scenarios only cover the cases someone thought of. To catch the rest, the engine is checked against a second, deliberately naive implementation ([tests/support/reference_book.hpp](tests/support/reference_book.hpp)). The reference keeps every resting order in one flat vector and finds the best match with a linear scan, so it is slow but easy to verify by reading.
@@ -736,7 +810,7 @@ Every push runs two workflows:
 | CI | Thread sanitizer | Every test under ThreadSanitizer, covering the pipeline's threads and the journal's I/O thread |
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
 | CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
-| CI | Smoke tests | `tradematch_benchmark` and `tradematch_pipeline_benchmark` run short workloads, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform. The pipeline benchmark also checks its book against a single-threaded replay |
+| CI | Smoke tests | Every scenario's transcript matches its golden file. `tradematch_benchmark` and `tradematch_pipeline_benchmark` run short workloads, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform. The pipeline benchmark also checks its book against a single-threaded replay |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
 | Fuzz | libFuzzer | Two targets, order flow and journal/snapshot decoding, fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
@@ -749,6 +823,5 @@ It is also a strong stepping stone for deeper systems work: network gateways in 
 
 ## Future Improvements
 
-- An interactive command line and scripted scenarios
 - A FIX gateway and a NASDAQ ITCH replay tool
 - WebAssembly and Python front ends
