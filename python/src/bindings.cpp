@@ -353,6 +353,7 @@ std::unique_ptr<Simulation> make_simulation(std::uint64_t seed,
                                             std::size_t market_makers,
                                             std::size_t noise_traders,
                                             std::size_t momentum_traders,
+                                            std::size_t execution_traders,
                                             double volatility,
                                             double news_probability,
                                             bool record_quotes) {
@@ -378,6 +379,7 @@ std::unique_ptr<Simulation> make_simulation(std::uint64_t seed,
     config.market_makers = market_makers;
     config.noise_traders = noise_traders;
     config.momentum_traders = momentum_traders;
+    config.execution_traders = execution_traders;
     config.volatility = volatility;
     config.news_probability = news_probability;
     config.measure_latency = false;
@@ -844,9 +846,10 @@ PYBIND11_MODULE(_tradematch, module) {
 
     py::class_<Simulation>(module,
                            "MarketSimulator",
-                           "An agent-based market of market makers, noise traders, momentum traders, and a whale, "
-                           "trading through opening auctions, continuous sessions, and closing auctions. It records "
-                           "every trade and, after every step, each symbol's top of book.")
+                           "An agent-based market of market makers, noise traders, momentum traders, execution "
+                           "traders that slice large orders into small ones, and a whale, trading through opening "
+                           "auctions, continuous sessions, and closing auctions. It records every trade and, after "
+                           "every step, each symbol's top of book.")
         .def(py::init(&make_simulation),
              py::kw_only(),
              py::arg("seed") = 7,
@@ -860,6 +863,7 @@ PYBIND11_MODULE(_tradematch, module) {
              py::arg("market_makers") = 4,
              py::arg("noise_traders") = 16,
              py::arg("momentum_traders") = 3,
+             py::arg("execution_traders") = 2,
              py::arg("volatility") = 0.35,
              py::arg("news_probability") = 4e-4,
              py::arg("record_quotes") = true)

@@ -26,7 +26,7 @@ Prices are represented as integer ticks rather than floating-point values. In th
 | **[NASDAQ ITCH 5.0](#nasdaq-itch-50)** | Publishes the books as NASDAQ's binary feed, and rebuilds books from NASDAQ's own files: a full day of NASDAQ BX, 29 million messages, in about two seconds, with no anomalies |
 | **[Python and market microstructure](#python-and-market-microstructure)** | pybind11 bindings for the book, the simulator, and ITCH replay, and a notebook that measures the simulator against a real day of NASDAQ data |
 | **[FIX 4.2 gateway](#fix-gateway)** | Order entry over TCP, with an interactive client and a latency benchmark that measures the loopback floor beneath each round trip |
-| **[Market simulator and terminal UI](#live-market-simulator)** | Market makers, noise traders, momentum traders, and a whale, trading through opening auctions, continuous sessions, and closing auctions |
+| **[Market simulator and terminal UI](#live-market-simulator)** | Market makers, noise traders, momentum traders, execution traders that slice large orders, and a whale, trading through opening auctions, continuous sessions, and closing auctions |
 | **[Journal and recovery](#journal-snapshots-and-replay)** | A CRC-checked write-ahead journal of about 20 bytes per order, atomic snapshots, and replay to an identical state hash |
 | **[Multi-threaded pipeline](#multi-threaded-pipeline)** | Gateway, matcher, and publisher threads over lock-free rings: about 10 million requests a second end to end |
 | **[Testing](#differential-testing-and-fuzzing)** | Differential testing against a reference book, four libFuzzer targets, sanitizers, golden transcripts for every rule, and 97% line coverage, on [every push](#continuous-integration) |
@@ -538,13 +538,14 @@ make scenarios                                    # check every scenario against
 
 ## Live Market Simulator
 
-`tradematch_tui` runs an agent-based market on the engine and draws it live in the terminal. The simulator ([include/tradematch/simulator.hpp](include/tradematch/simulator.hpp)) moves a fair value on a random walk with occasional news jumps. Four kinds of agents trade around it:
+`tradematch_tui` runs an agent-based market on the engine and draws it live in the terminal. The simulator ([include/tradematch/simulator.hpp](include/tradematch/simulator.hpp)) moves a fair value on a random walk with occasional news jumps. Five kinds of agents trade around it:
 
 | Agent | Behavior |
 | --- | --- |
 | Market makers | Quote four levels per side around fair value with post-only DAY orders and re-price stale quotes with replace requests. They never quote through the opposite touch, so their quotes are never rejected |
 | Noise traders | Post passive DAY and GTC orders behind fair value, cross the touch with IOC limits and market orders, and cancel |
 | Momentum traders | Chase the trend with IOC orders when a fast moving average of the last price breaks away from a slow one |
+| Execution traders | Are handed a parent order of 3,000 to 30,000 shares on a random side every few seconds, and work it over one to five seconds in child orders of 100 or 200 shares, the way execution algorithms slice large orders. A schedule spreads the parent evenly over its horizon: one child waits at the best price on its own side, and IOC limits at or through the touch catch up with the schedule. This makes order flow persistent, as it is in real markets |
 | Whale | Works large icebergs that show 300 to 500 shares at a time, and parks stop and stop-limit orders 8 to 20 ticks beyond fair value |
 
 Every simulated day is a full exchange session: an opening call auction, continuous trading, a closing call auction, then day-order expiry before the next open. During the auctions the screen shows the indicative price, matched volume, and surplus as orders arrive. Every agent order carries an owner and self-trade prevention, and the `STP` counter shows how often an agent would have traded with itself.
@@ -622,20 +623,20 @@ A snapshot file holds every book's state and the journal sequence number it cove
 
 ```text
 $ ./build/tradematch_tui --seed 5 --frames 300 --speed 8 --no-sleep --headless --journal session.tmj
-simulated 02:42.000 over 2 day(s): 70,005 requests, 6,339 trades, 3 auctions
-journal session.tmj: 70,013 commands, 1,543,445 bytes
-state hash 0x280caf02de4bec9d
+simulated 02:42.000 over 2 day(s): 84,520 requests, 13,910 trades, 3 auctions
+journal session.tmj: 84,528 commands, 1,864,484 bytes
+state hash 0x0b36ce61ddcc91cc
 
-$ ./build/tradematch_replay session.tmj --depth 3 --expect-hash 0x280caf02de4bec9d
-journal     session.tmj  1,543,445 bytes, records 1..70,013
-replayed    70,013 commands in 3.8 ms  (18.59M commands/s)
-            ADD_SYMBOL 1  SUBMIT 9,798  CANCEL 1,563  REPLACE 58,644  BEGIN_AUCTION 3  UNCROSS 3  EXPIRE_DAY_ORDERS 1
-trades      6,339
-state hash  0x280caf02de4bec9d
-  ACME     CONTINUOUS  last 100.09  resting 665  stops 3
-           bid 100.08 x 5,800 (18)       ask 100.09 x 2,100 (4)
-               100.07 x 5,600 (21)           100.10 x 3,200 (12)
-               100.06 x 6,000 (22)           100.11 x 3,200 (10)
+$ ./build/tradematch_replay session.tmj --depth 3 --expect-hash 0x0b36ce61ddcc91cc
+journal     session.tmj  1,864,484 bytes, records 1..84,528
+replayed    84,528 commands in 4.6 ms  (18.22M commands/s)
+            ADD_SYMBOL 1  SUBMIT 18,798  CANCEL 1,770  REPLACE 63,952  BEGIN_AUCTION 3  UNCROSS 3  EXPIRE_DAY_ORDERS 1
+trades      13,910
+state hash  0x0b36ce61ddcc91cc
+  ACME     CONTINUOUS  last 99.69  resting 529  stops 2
+           bid 99.69 x 1,100 (3)         ask 99.70 x 400 (2)
+               99.68 x 3,000 (11)            99.71 x 1,000 (2)
+               99.67 x 7,000 (17)            99.72 x 1,800 (5)
 verified    the replayed state matches the expected hash
 ```
 
@@ -770,7 +771,7 @@ SPY at 10:00:00.000, 29 orders resting
 
 **The replica.** `BookReplica` keeps a TradeMatch `OrderBook` per stock, held in auction mode so that it never matches. An exchange feed reports every execution itself, so a book that matched crossing orders would execute them twice. Adds join the back of their queue, executions and partial cancels amend orders in place so they keep their place, replaces re-enter at the back under a new reference, and deletes remove. A message that doesn't fit the books, such as a delete of an order that was never added, is counted as an anomaly rather than trusted. A trade listener hears every trade the feed prints, with the side that took liquidity wherever the feed shows it: the side opposite the order an execution names. Trades with hidden orders don't say, and crosses have no aggressor.
 
-**Publishing.** `FeedPublisher` turns the book's [order events](#multiple-instruments-and-market-data) into ITCH: a stock directory message for each symbol, then adds, executions, partial cancels, deletes, and replaces. A replace that re-enters the book without trading is a single replace message. Auction executions are non-printable executions whose volume a cross trade message reports. Order references are renewed whenever an order, or an iceberg's next tranche, joins the back of a queue, as ITCH requires. A price the 32-bit price field can't carry, above $429,496.7295 (the ceiling Berkshire Hathaway's class A shares ran into in 2021), is refused rather than wrapped around. `tradematch_itch generate` runs the [market simulator](#live-market-simulator) through one trading day and writes its feed: 2.4 million messages for a 30-minute session of three stocks, in under a second. With `--verify` it then replays the file and checks that every book comes back order for order, under the same references and in the same queue order.
+**Publishing.** `FeedPublisher` turns the book's [order events](#multiple-instruments-and-market-data) into ITCH: a stock directory message for each symbol, then adds, executions, partial cancels, deletes, and replaces. A replace that re-enters the book without trading is a single replace message. Auction executions are non-printable executions whose volume a cross trade message reports. Order references are renewed whenever an order, or an iceberg's next tranche, joins the back of a queue, as ITCH requires. A price the 32-bit price field can't carry, above $429,496.7295 (the ceiling Berkshire Hathaway's class A shares ran into in 2021), is refused rather than wrapped around. `tradematch_itch generate` runs the [market simulator](#live-market-simulator) through one trading day and writes its feed: 3.0 million messages for a 30-minute session of three stocks, in under a second. With `--verify` it then replays the file and checks that every book comes back order for order, under the same references and in the same queue order.
 
 ```bash
 ./build/tradematch_itch replay day.itch --at 10:00 --symbol AAPL   # the books as of 10:00, and the most traded stocks
@@ -800,20 +801,20 @@ replica.advance("10:00")                          # the books as of 10:00; the n
 replica.top_of_book("GDX"), replica.take_trades()  # trades come with the side that took liquidity
 ```
 
-The [market microstructure notebook](notebooks/market_microstructure.ipynb) puts this to work. It measures the simulated market the way empirical studies measure real ones, and runs an experiment only a simulator can: the same market with 0 to 16 market makers. Then it replays the whole NASDAQ BX day of December 30, 2019, 29 million messages in under four seconds from Python while sampling a book every 100 ms, and repeats the measurements on GDX, the stock with the most trades on BX that day:
+The [market microstructure notebook](notebooks/market_microstructure.ipynb) puts this to work. It measures the simulated market the way empirical studies measure real ones, and runs experiments only a simulator can: the same market with 0 to 16 market makers, and without its execution traders. Then it replays the whole NASDAQ BX day of December 30, 2019, 29 million messages in under four seconds from Python while sampling a book every 100 ms, and repeats the measurements on GDX, the stock with the most trades on BX that day:
 
 <p align="center">
-  <img src="docs/assets/microstructure.png" width="857" alt="Four charts: a simulated mid price tracking its hidden fair value; the mean spread falling from about six ticks with no market makers to about one tick with one or more; the probability that the next mid-price move is up rising with queue imbalance, for the simulator and for GDX on NASDAQ BX; and the autocorrelation of order signs, high and fast-decaying for GDX and low and slow-decaying for the simulator">
+  <img src="docs/assets/microstructure.png" width="857" alt="Four charts: a simulated mid price tracking its hidden fair value; the mean spread falling from about seven and a half ticks with no market makers to under two with one, and toward one tick with more; the probability that the next mid-price move is up rising with queue imbalance, for the simulator and for GDX on NASDAQ BX; and the autocorrelation of order signs, starting near 0.9 for GDX and near 0.6 for the simulator, and fading within about seventy orders for GDX and a few hundred for the simulator">
 </p>
 
-Both markets show the textbook patterns: the imbalance between the queues at the best bid and offer predicts the direction of the next price move, and buy orders follow buy orders. The comparison also shows where the simulator falls short. Real order flow is far more persistent over the next few dozen orders, the pattern usually attributed to algorithms slicing large orders into small ones, and none of the simulator's agents do that yet.
+Both markets show the textbook patterns: the imbalance between the queues at the best bid and offer predicts the direction of the next price move, and buy orders follow buy orders. That persistence is usually attributed to algorithms slicing large orders into many small ones, and in the simulator it comes from the execution traders, which do just that: they raise the autocorrelation of consecutive order signs from 0.13 to 0.58. Real order flow is more persistent still at short lags, 0.89 for GDX, and it fades faster, within about seventy orders rather than a few hundred.
 
 ```bash
 pip install ".[test]" && pytest                # the package and its tests
 pip install ".[notebook]" && jupyter lab notebooks/market_microstructure.ipynb
 ```
 
-**Tests.** [python/tests](python/tests) checks the book's rules from Python: price-time priority, time in force, rejects, replaces that keep or lose their place, icebergs, stops, self-trade prevention, and call auctions. A seed must replay the same market, in threads too. The simulator's tape must agree with the engine's own market-data feed, a market without market makers must have wider spreads, and a busy simulator must refuse other threads. The ITCH tests replay a file encoded byte by byte with `struct.pack` from the specification, independently of the C++ encoder, stopping partway through the day and carrying on.
+**Tests.** [python/tests](python/tests) checks the book's rules from Python: price-time priority, time in force, rejects, replaces that keep or lose their place, icebergs, stops, self-trade prevention, and call auctions. A seed must replay the same market, in threads too. The simulator's tape must agree with the engine's own market-data feed, a market without market makers must have wider spreads, one without execution traders less persistent order flow, and a busy simulator must refuse other threads. The ITCH tests replay a file encoded byte by byte with `struct.pack` from the specification, independently of the C++ encoder, stopping partway through the day and carrying on.
 
 ## Example Workflow
 
@@ -909,10 +910,11 @@ The benchmark tooling has its own tests ([tests/bench_tests.cpp](tests/bench_tes
 
 The simulator suite ([tests/simulator_tests.cpp](tests/simulator_tests.cpp)) runs whole trading days:
 
-- a seed replays identically, and seed 42 reproduces a golden fingerprint of the stats and every resting order on every CI platform
+- a seed replays identically, and seed 42 reproduces a golden fingerprint of the stats and every resting order on every CI platform; without execution traders, it reproduces the fingerprint of the market before they were added, so the other agents are unchanged
 - sessions cycle through the opening auction, continuous trading, the closing auction, and the close, with the book in the matching phase and never crossed during continuous trading
 - auctions attract an indicative price and execute, and each finished day records its closing price
 - the agents produce a busy, valid market: over 10,000 requests a simulated minute without a single reject, self-trade prevention at work, a deep book, and prices that track fair value
+- the execution traders' requests, picked out of a journaled day by owner, are IOC and DAY limit orders of 100 or 200 shares, sent only in continuous trading, many to each parent; the lag-1 autocorrelation of aggressive order signs is above 0.4 with them and below 0.25 without, and the market they make replays identically
 
 CTest also runs the terminal UI headless for 60 frames as a smoke test.
 
@@ -1077,4 +1079,3 @@ It is also a strong stepping stone for deeper systems work, such as putting the 
 
 - MoldUDP64, the transport that carries ITCH live, alongside its file format
 - FIX resend requests and sequence numbers that persist across reconnects
-- An agent that slices large orders into small ones, so the simulator's order flow persists like real flow

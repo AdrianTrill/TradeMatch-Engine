@@ -43,9 +43,11 @@ quotes = pd.DataFrame(simulator.take_quotes(),
 The simulator records every trade, with the side that took liquidity ('B', 'S', or 'X' for an auction) and the orders
 on both sides. After every 10 ms step it records each symbol's top of book and the fair value the market makers quote
 around, which the other agents can't see. A seed always replays the same market, and the numbers of market makers,
-noise traders, and momentum traders, the volatility, and the length of each part of the day are all arguments, so
-experiments are a loop away. `step()`, `run()`, and `run_day()` release the GIL, so simulators in separate threads run
-in parallel.
+noise traders, momentum traders, and execution traders, the volatility, and the length of each part of the day are all
+arguments, so experiments are a loop away. The execution traders (`execution_traders`, two by default) work large
+parent orders of 3,000 to 30,000 shares in child orders of 100 or 200 shares, which makes order flow persistent, as
+algorithms slicing large orders make it in real markets; `execution_traders=0` turns them off. `step()`, `run()`, and
+`run_day()` release the GIL, so simulators in separate threads run in parallel.
 
 ## ITCH replay
 

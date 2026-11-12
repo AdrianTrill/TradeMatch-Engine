@@ -1,12 +1,19 @@
+#include "tradematch/journal.hpp"
 #include "tradematch/simulator.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -53,6 +60,73 @@ tradematch::SimulationConfig short_day(std::uint64_t seed) {
     return config;
 }
 
+// A file in the temporary directory, removed when it goes out of scope.
+class TempFile {
+public:
+    TempFile()
+        : path_(std::filesystem::temp_directory_path() /
+                ("tradematch-simulator-test-" + std::to_string(std::random_device{}()) + ".tmj")) {}
+    TempFile(const TempFile&) = delete;
+    TempFile& operator=(const TempFile&) = delete;
+    TempFile(TempFile&&) = delete;
+    TempFile& operator=(TempFile&&) = delete;
+    ~TempFile() {
+        std::error_code ignored;
+        std::filesystem::remove(path_, ignored);
+    }
+
+    const std::filesystem::path& path() const {
+        return path_;
+    }
+
+private:
+    std::filesystem::path path_;
+};
+
+// The signs of aggressive orders in continuous trading, +1 for a buy and -1 for a sell, each order counted once
+// however many resting orders it fills, as the market microstructure notebook counts them.
+class AggressorSigns final : public tradematch::OrderFeedListener {
+public:
+    void on_order_events(tradematch::SymbolId /*symbol*/,
+                         std::span<const tradematch::OrderEvent> /*events*/,
+                         std::span<const tradematch::Trade> trades) override {
+        for (const tradematch::Trade& trade : trades) {
+            const bool buy = trade.aggressor_side == tradematch::Side::Buy;
+            const tradematch::OrderId taker = buy ? trade.buy_order_id : trade.sell_order_id;
+            if (!trade.auction && taker != last_taker_) {
+                signs_.push_back(buy ? 1.0 : -1.0);
+                last_taker_ = taker;
+            }
+        }
+    }
+
+    const std::vector<double>& signs() const {
+        return signs_;
+    }
+
+    double autocorrelation(std::size_t lag) const {
+        double mean = 0.0;
+        for (const double sign : signs_) {
+            mean += sign;
+        }
+        mean /= static_cast<double>(signs_.size());
+        double variance = 0.0;
+        for (const double sign : signs_) {
+            variance += (sign - mean) * (sign - mean);
+        }
+        double covariance = 0.0;
+        for (std::size_t index = lag; index < signs_.size(); ++index) {
+            covariance += (signs_[index] - mean) * (signs_[index - lag] - mean);
+        }
+        return (covariance / static_cast<double>(signs_.size() - lag)) /
+               (variance / static_cast<double>(signs_.size()));
+    }
+
+private:
+    std::vector<double> signs_;
+    tradematch::OrderId last_taker_{0};
+};
+
 void test_same_seed_replays_identically() {
     tradematch::MarketSimulator first(short_day(11));
     tradematch::MarketSimulator second(short_day(11));
@@ -73,8 +147,9 @@ void test_same_seed_replays_identically() {
            "A different seed should take a different path.");
 }
 
-void test_seed_replays_on_every_platform() {
-    tradematch::MarketSimulator sim(short_day(42));
+// A digest of a simulated day: the stats, the last price, and every resting order, level by level, in queue order.
+std::uint64_t fingerprint_of(const tradematch::SimulationConfig& config) {
+    tradematch::MarketSimulator sim(config);
     sim.run_for(30 * kSecond);  // a full day, including both auctions and day-order expiry, and the next open
     const auto symbol = sim.symbol(0);
     const auto& stats = sim.stats();
@@ -96,11 +171,25 @@ void test_seed_replays_on_every_platform() {
             }
         }
     }
+    return fingerprint.value();
+}
+
+void test_seed_replays_on_every_platform() {
+    const std::uint64_t value = fingerprint_of(short_day(42));
     // Every platform in CI must reproduce this value: the simulator avoids the standard distributions, whose output
     // differs between standard libraries, and floating-point contraction.
-    expect(fingerprint.value() == 0xB967CF06DD20626AU,
-           "Seed 42 should replay the same market everywhere, but its fingerprint is " +
-               std::to_string(fingerprint.value()) + ".");
+    expect(value == 0x2BB181033465076AU,
+           "Seed 42 should replay the same market everywhere, but its fingerprint is " + std::to_string(value) + ".");
+
+    // Without execution traders the other agents draw the same random numbers as before there were any, so the market
+    // is exactly the one they made on their own.
+    auto without_execution = short_day(42);
+    without_execution.execution_traders = 0;
+    const std::uint64_t without_value = fingerprint_of(without_execution);
+    expect(without_value == 0xB967CF06DD20626AU,
+           "Without execution traders, seed 42 should replay the market of the other agents alone, but its "
+           "fingerprint is " +
+               std::to_string(without_value) + ".");
 }
 
 void test_session_names() {
@@ -258,6 +347,88 @@ void test_outside_orders_trade_with_the_agents() {
     expect(!book.has_auction_market_order(waiting.order_id), "The uncross should take the market order.");
 }
 
+void test_execution_traders_slice_parent_orders() {
+    auto config = short_day(21);
+    config.symbols = {"ACME", "GLOBEX"};
+    const TempFile file;
+    {
+        tradematch::JournalWriter journal(file.path(),
+                                          tradematch::JournalOptions{tradematch::Durability::Buffered, true, 1});
+        tradematch::MarketSimulator sim(config, &journal);
+        sim.run_for(25 * kSecond);  // one full day
+        journal.close();
+    }
+
+    // The journal names every order's owner, and owners are numbered in turn: the market makers, the noise traders,
+    // the momentum traders, then the execution traders.
+    const auto first =
+        static_cast<tradematch::OwnerId>(config.market_makers + config.noise_traders + config.momentum_traders + 1);
+    const auto last = static_cast<tradematch::OwnerId>(first + config.execution_traders - 1);
+    const tradematch::Timestamp open = config.opening_auction;
+    const tradematch::Timestamp close = config.opening_auction + config.continuous;
+    std::map<std::pair<tradematch::OwnerId, tradematch::SymbolId>, tradematch::Side> sides;
+    std::size_t children = 0;
+    std::size_t marketable = 0;
+    std::size_t runs = 0;  // runs of children on one side; each new parent on the other side starts one
+    tradematch::JournalReader reader(file.path());
+    tradematch::Command command;
+    while (reader.next(command)) {
+        const tradematch::OrderRequest& order = command.order;
+        if (command.type != tradematch::CommandType::Submit || order.owner < first || order.owner > last) {
+            continue;
+        }
+        ++children;
+        const bool immediate = order.time_in_force == tradematch::TimeInForce::ImmediateOrCancel;
+        marketable += immediate ? 1U : 0U;
+        expect(order.type == tradematch::OrderType::Limit && (order.quantity == 100U || order.quantity == 200U) &&
+                   (immediate || order.time_in_force == tradematch::TimeInForce::Day),
+               "Child orders should be IOC or DAY limit orders the size of other agents' orders.");
+        expect(command.timestamp > open && command.timestamp <= close,
+               "Execution traders should only trade in continuous trading.");
+        const auto [entry, added] = sides.try_emplace({order.owner, command.symbol}, order.side);
+        if (added || entry->second != order.side) {
+            entry->second = order.side;
+            ++runs;
+        }
+    }
+    expect(children > 2'000U, "Execution traders should send a stream of child orders.");
+    expect(sides.size() == 2 * config.execution_traders, "Each execution trader should work parents on every symbol.");
+    expect(marketable > children * 3 / 4 && marketable < children,
+           "Most children should take liquidity, and some should join the best price.");
+    expect(children > 20 * runs, "Each parent should be worked in many child orders on its side.");
+}
+
+// One day with a minute of continuous trading, seen through its aggressive orders.
+AggressorSigns aggressor_signs(std::uint64_t seed, std::size_t execution_traders) {
+    auto config = short_day(seed);
+    config.continuous = 60 * kSecond;
+    config.execution_traders = execution_traders;
+    tradematch::MarketSimulator sim(config);
+    AggressorSigns signs;
+    sim.set_order_listener(&signs);
+    sim.run_for(65 * kSecond);
+    sim.set_order_listener(nullptr);
+    return signs;
+}
+
+void test_execution_traders_make_order_flow_persistent() {
+    for (const std::uint64_t seed : {31U, 32U}) {
+        const AggressorSigns sliced = aggressor_signs(seed, 2);
+        const AggressorSigns unsliced = aggressor_signs(seed, 0);
+        expect(sliced.signs().size() > 2 * unsliced.signs().size(),
+               "Execution traders' children should be most of the aggressive orders.");
+        // Without them, a buy follows a buy only a little more often than chance.
+        expect(sliced.autocorrelation(1) > 0.4 && unsliced.autocorrelation(1) < 0.25,
+               "Sliced parents should make the signs of aggressive orders persistent, but the lag-1 autocorrelation "
+               "is " +
+                   std::to_string(sliced.autocorrelation(1)) + " with execution traders and " +
+                   std::to_string(unsliced.autocorrelation(1)) + " without.");
+        expect(sliced.autocorrelation(100) < sliced.autocorrelation(1) - 0.2,
+               "The persistence should fade as parents finish, within a hundred or so orders.");
+        expect(aggressor_signs(seed, 2).signs() == sliced.signs(), "Execution traders should replay identically.");
+    }
+}
+
 struct TestCase {
     const char* name;
     std::function<void()> run;
@@ -271,6 +442,8 @@ int run_all_tests() {
         {"sessions_cycle_through_auctions", test_sessions_cycle_through_auctions},
         {"agents_exercise_the_engine", test_agents_exercise_the_engine},
         {"outside_orders_trade_with_the_agents", test_outside_orders_trade_with_the_agents},
+        {"execution_traders_slice_parent_orders", test_execution_traders_slice_parent_orders},
+        {"execution_traders_make_order_flow_persistent", test_execution_traders_make_order_flow_persistent},
     };
 
     std::size_t failures = 0;

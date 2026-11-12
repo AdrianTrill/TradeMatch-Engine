@@ -82,6 +82,32 @@ def test_market_makers_keep_the_spread_tight():
     assert statistics.mean(continuous_spreads(without_makers)) > 2 * statistics.mean(continuous_spreads(with_makers))
 
 
+def aggressive_order_signs(trades):
+    # +1 for a buy and -1 for a sell, once per aggressive order however many resting orders it fills.
+    signs, last_taker = [], None
+    for *_, aggressor, buy, sell in trades:
+        taker = buy if aggressor == "B" else sell
+        if aggressor != "X" and taker != last_taker:
+            signs.append(1 if aggressor == "B" else -1)
+            last_taker = taker
+    return signs
+
+
+def lag_one_autocorrelation(values):
+    mean = statistics.fmean(values)
+    centered = [value - mean for value in values]
+    return statistics.fmean(a * b for a, b in zip(centered, centered[1:])) / statistics.fmean(c * c for c in centered)
+
+
+def test_execution_traders_make_order_flow_persistent():
+    _, sliced, _ = run_day(seed=3, record_quotes=False)
+    _, unsliced, _ = run_day(seed=3, execution_traders=0, record_quotes=False)
+    sliced_signs, unsliced_signs = aggressive_order_signs(sliced), aggressive_order_signs(unsliced)
+    assert len(sliced_signs) > 2 * len(unsliced_signs), "most aggressive orders are execution traders' children"
+    assert lag_one_autocorrelation(sliced_signs) > 0.4
+    assert lag_one_autocorrelation(unsliced_signs) < 0.25
+
+
 def test_records_are_taken_once():
     simulator = tm.MarketSimulator(seed=1, record_quotes=False)
     simulator.run(10.0)

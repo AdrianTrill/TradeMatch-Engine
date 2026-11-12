@@ -28,6 +28,18 @@ double standard_normal(std::mt19937_64& rng) {
     return sum - 6.0;
 }
 
+// A large order an execution trader has been given to buy or sell on one symbol, which it works in child orders.
+struct ParentOrder {
+    Side side{Side::Buy};
+    Quantity quantity{};  // 0 when there is none
+    Quantity executed{};
+    Timestamp start{};
+    Timestamp end{};          // when its schedule has released all of it
+    Price limit{};            // the worst price a child may trade at
+    OrderId resting{};        // a passive child at the touch, if any
+    Quantity resting_open{};  // its open quantity when last seen
+};
+
 }  // namespace
 
 const char* to_string(SessionPhase phase) noexcept {
@@ -49,7 +61,8 @@ struct MarketSimulator::Agent {
         MarketMaker,
         Noise,
         Momentum,
-        Whale
+        Whale,
+        Execution
     };
 
     Kind kind{Kind::Noise};
@@ -61,6 +74,7 @@ struct MarketSimulator::Agent {
     Quantity size{};
     std::vector<std::pair<std::size_t, OrderId>> live;  // (symbol index, order ID) of possibly live orders
     std::vector<std::vector<OrderId>> quotes;           // market makers: [symbol][side * levels + level]
+    std::vector<ParentOrder> parents;                   // execution traders: [symbol]
 };
 
 MarketSimulator::MarketSimulator(SimulationConfig config, JournalWriter* journal)
@@ -109,6 +123,15 @@ MarketSimulator::MarketSimulator(SimulationConfig config, JournalWriter* journal
         momentum.activity = 0.02;
         momentum.size = 300;
         agents_.push_back(std::move(momentum));
+    }
+    for (std::size_t index = 0; index < config_.execution_traders; ++index) {
+        Agent execution;
+        execution.kind = Agent::Kind::Execution;
+        execution.owner = owner++;
+        execution.activity = 1.0;  // it looks at every step and times its children itself
+        execution.size = 100;
+        execution.parents.assign(symbols_.size(), ParentOrder{});
+        agents_.push_back(std::move(execution));
     }
     Agent whale;
     whale.kind = Agent::Kind::Whale;
@@ -253,6 +276,9 @@ void MarketSimulator::act(Agent& agent, std::size_t index) {
             break;
         case Agent::Kind::Whale:
             trade_whale(agent, index);
+            break;
+        case Agent::Kind::Execution:
+            trade_execution(agent, index);
             break;
     }
 }
@@ -411,7 +437,108 @@ void MarketSimulator::trade_whale(Agent& agent, std::size_t index) {
     send(agent, index, order);
 }
 
-void MarketSimulator::send(Agent& agent, std::size_t index, OrderRequest order) {
+// Now and then an execution trader is given a large parent order on a random side, and slices it into child orders
+// the size of other agents' orders. A schedule releases the parent evenly over its horizon. Every 100 ms or so the
+// trader looks at the book, keeps one child waiting at the best price on its own side, and catches up with the
+// schedule with marketable IOC children at or through the touch, which do most of the work. Runs of children on one
+// side, for as long as a parent lasts, make order flow persistent, as algorithms slicing large orders make real order
+// flow.
+void MarketSimulator::trade_execution(Agent& agent, std::size_t index) {
+    constexpr Timestamp kSecond = 1'000'000'000;
+    ParentOrder& parent = agent.parents[index];
+    const Instrument& instrument = symbols_[index];
+    const OrderBook& book = engine_.book(instrument.id);
+
+    std::optional<RestingOrderView> resting;
+    if (parent.resting != 0) {
+        // Fills of the passive child since the last look count toward the parent.
+        resting = book.get_order(parent.resting);
+        const Quantity open = resting ? resting->remaining_quantity : 0;
+        parent.executed += parent.resting_open - open;
+        parent.resting_open = open;
+        if (!resting) {
+            parent.resting = 0;
+        }
+    }
+    const bool continuous = phase_ == SessionPhase::Continuous;
+    if (parent.quantity != 0 && (!continuous || parent.executed == parent.quantity || now_ >= parent.end + kSecond)) {
+        // Done, a second past its schedule, or out of continuous trading: whatever is left is abandoned.
+        if (parent.resting != 0) {
+            cancel(agent, index, parent.resting);
+        }
+        parent = ParentOrder{};
+        return;
+    }
+    if (!continuous) {
+        return;
+    }
+
+    if (parent.quantity == 0) {
+        // After about two seconds without one, a parent of 3,000 to 30,000 shares to work at 6,000 to 12,000 shares a
+        // second, over one to five seconds, at prices no more than 20 ticks worse than the touch on arrival.
+        if (phase_time_remaining() < kSecond || !chance(0.005)) {
+            return;
+        }
+        const Side side = chance(0.5) ? Side::Buy : Side::Sell;
+        const auto quantity = static_cast<Quantity>(100 * uniform(30, 300));
+        const std::uint64_t pace = 100 * uniform(60, 120);
+        const auto horizon = std::max(static_cast<Timestamp>(quantity * 1'000'000'000ULL / pace), kSecond);
+        const auto touch = side == Side::Buy ? book.best_ask() : book.best_bid();
+        const Price arrival = touch.value_or(tick(instrument.fair));
+        parent = ParentOrder{side, quantity, 0, now_, now_ + std::min(horizon, phase_time_remaining()), 0, 0, 0};
+        parent.limit = side == Side::Buy ? arrival + 20 : std::max<Price>(1, arrival - 20);
+        return;
+    }
+    if (!chance(0.1)) {
+        return;
+    }
+
+    const bool buy = parent.side == Side::Buy;
+    const auto best = buy ? book.best_bid() : book.best_ask();
+    if (resting && (now_ >= parent.end || resting->price != best.value_or(resting->price))) {
+        // The market has moved away from the passive child, or the schedule is over and the rest must be taken.
+        cancel(agent, index, parent.resting);
+        parent.resting = 0;
+        parent.resting_open = 0;
+    }
+    if (parent.resting == 0 && now_ < parent.end && best && (buy ? *best <= parent.limit : *best >= parent.limit)) {
+        // One child waits at the best price on its own side, for the other side to come to it.
+        const auto size =
+            std::min(static_cast<Quantity>(agent.size * uniform(1, 2)), parent.quantity - parent.executed);
+        const OrderId order_id = next_order_id_;
+        parent.executed +=
+            send(agent, index, OrderRequest{0, parent.side, OrderType::Limit, size, *best, TimeInForce::Day});
+        if (const auto child = book.get_order(order_id)) {
+            parent.resting = order_id;
+            parent.resting_open = child->remaining_quantity;
+        }
+    }
+
+    // Catch up with the schedule, a child at a time, while the touch holds out within the limit.
+    const auto elapsed = static_cast<std::uint64_t>(now_ - parent.start);
+    const auto horizon = static_cast<std::uint64_t>(parent.end - parent.start);
+    const auto due = elapsed < horizon ? static_cast<Quantity>(parent.quantity * elapsed / horizon) : parent.quantity;
+    for (int child = 0; child < 20 && parent.executed + parent.resting_open < due; ++child) {
+        const auto touch = buy ? book.best_ask() : book.best_bid();
+        if (!touch || (buy ? *touch > parent.limit : *touch < parent.limit)) {
+            break;
+        }
+        const auto through = static_cast<Price>(uniform(0, 1));
+        const Price price = buy ? std::min(*touch + through, parent.limit) : std::max(*touch - through, parent.limit);
+        const auto size = std::min(static_cast<Quantity>(agent.size * uniform(1, 2)),
+                                   parent.quantity - parent.executed - parent.resting_open);
+        const Quantity filled =
+            send(agent,
+                 index,
+                 OrderRequest{0, parent.side, OrderType::Limit, size, price, TimeInForce::ImmediateOrCancel});
+        parent.executed += filled;
+        if (filled < size) {
+            break;
+        }
+    }
+}
+
+Quantity MarketSimulator::send(Agent& agent, std::size_t index, OrderRequest order) {
     order.order_id = next_order_id_++;
     order.owner = agent.owner;
     order.self_trade_prevention = SelfTradePrevention::CancelOldest;
@@ -419,6 +546,7 @@ void MarketSimulator::send(Agent& agent, std::size_t index, OrderRequest order) 
     if (result.rested || result.pending_trigger) {
         agent.live.emplace_back(index, order.order_id);
     }
+    return result.filled_quantity;
 }
 
 // Sends an order to the exchange, timed, and counted in the stats.

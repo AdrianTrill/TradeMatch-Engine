@@ -42,6 +42,7 @@ struct SimulationConfig {
     std::size_t market_makers{4};
     std::size_t noise_traders{16};
     std::size_t momentum_traders{3};
+    std::size_t execution_traders{2};
     double volatility{0.35};        // fair-value standard deviation per step, in ticks
     double news_probability{4e-4};  // chance per step of a jump in fair value
     bool measure_latency{true};
@@ -59,10 +60,11 @@ struct SimulationStats {
 
 // A deterministic, agent-based market around a random-walk fair value, running full exchange sessions: an opening call
 // auction, continuous trading, a closing call auction, and day-order expiry. Market makers quote several levels per
-// side, noise traders post and cancel passive orders and send marketable ones, momentum traders chase trends, and a
-// "whale" works large icebergs and stop orders. Everything is driven by one seeded random generator and simulated
-// time, so a given configuration replays identically. With a journal, every engine command is recorded, and
-// replaying the journal rebuilds the exact same books.
+// side, noise traders post and cancel passive orders and send marketable ones, momentum traders chase trends,
+// execution traders slice large parent orders into many small child orders, and a "whale" works large icebergs and
+// stop orders. Everything is driven by one seeded random generator and simulated time, so a given configuration
+// replays identically. With a journal, every engine command is recorded, and replaying the journal rebuilds the exact
+// same books.
 class MarketSimulator {
 public:
     explicit MarketSimulator(SimulationConfig config = {}, JournalWriter* journal = nullptr);
@@ -166,7 +168,8 @@ private:
     void trade_noise(Agent& agent, std::size_t index);
     void trade_momentum(Agent& agent, std::size_t index);
     void trade_whale(Agent& agent, std::size_t index);
-    void send(Agent& agent, std::size_t index, OrderRequest order);
+    void trade_execution(Agent& agent, std::size_t index);
+    Quantity send(Agent& agent, std::size_t index, OrderRequest order);
     SubmitResult place(std::size_t index, const OrderRequest& order);
     void check_outside_owner(OwnerId owner) const;
     void cancel(Agent& agent, std::size_t index, OrderId order_id);
