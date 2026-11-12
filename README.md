@@ -1,12 +1,16 @@
-# TradeMatch Engine
+<p align="center">
+  <a href="https://adriantrill.github.io/TradeMatch-Engine/"><img src="web/social.png" width="857" alt="TradeMatch Engine: a matching engine, live in your browser. Price-time priority in C++20, compiled to WebAssembly, beside a screenshot of the playground trading"></a>
+</p>
 
-[![CI](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml)
-[![Fuzz](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml)
-[![Playground](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/playground.yml/badge.svg?branch=main)](https://adriantrill.github.io/TradeMatch-Engine/)
-![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
-![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
-![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml"><img src="https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml"><img src="https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml/badge.svg?branch=main" alt="Fuzz"></a>
+  <a href="https://adriantrill.github.io/TradeMatch-Engine/"><img src="https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/playground.yml/badge.svg?branch=main" alt="Playground"></a>
+  <img src="https://img.shields.io/badge/C%2B%2B-20-blue.svg" alt="C++20">
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python">
+  <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg" alt="Platforms">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
+</p>
 
 TradeMatch Engine is a price-time-priority order matching engine in C++20, with the exchange infrastructure around it. The matching core handles limit, market, stop, iceberg, and post-only orders, every common time in force, self-trade prevention, and opening and closing call auctions, at about 50 million operations a second on one core, without a single heap allocation on the request path. Around it are a crash-safe journal, a multi-threaded pipeline, a FIX 4.2 gateway, NASDAQ ITCH 5.0 publishing and replay checked against a full day of real NASDAQ data, an agent-based market simulator with a live terminal UI, a WebAssembly playground, and Python bindings with a market microstructure notebook. Every rule is tested against an independent reference model and fuzzed, on Linux, macOS, and Windows.
 
