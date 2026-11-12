@@ -42,6 +42,8 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Resting-order lookup by order ID
 - Multiple instruments through `MatchingEngine`, with one book per symbol
 - Market data: L2 depth updates, top of book, trade tape, OHLCV candles, VWAP, and a gap-free sequenced feed
+- Order-level (L3) market data, published as a NASDAQ TotalView-ITCH 5.0 feed
+- Replay of NASDAQ ITCH 5.0 files into order books, checked against a full day of real NASDAQ data
 - Machine-readable reject reasons for every rejected request
 - Zero heap allocations on the request path once capacity is reserved
 - A write-ahead journal of every command: CRC-32C-checked, about 20 bytes per order, and safe against torn writes
@@ -93,6 +95,8 @@ auto snapshot = book.snapshot();
 ### Multiple instruments and market data
 
 `MatchingEngine` owns one `OrderBook` per symbol and routes requests by `SymbolId`. Requests for unknown symbols are rejected with `UnknownSymbol`. Attaching a `MarketDataListener` turns on market data for every book: after each request, a book reports the trades it executed, then one `LevelUpdate` per price level it changed, carrying that level's final displayed quantity and order count (0 means the level is gone). Because every changed level is reported with its final state, a consumer can keep an exact copy of the book's depth from the updates alone. With no listener attached, books skip the bookkeeping entirely.
+
+Order-level (L3) data is available too. An `OrderFeedListener` hears, after each request, every change the request made to a resting order, in execution order: an `OrderEvent` for each order added (or iceberg tranche shown), executed, reduced in place, or deleted, counting only displayed quantity, together with the request's trades. Applying the events in order reproduces every queue exactly, and the [ITCH publisher](#nasdaq-itch-50) is built on them. They cost nothing until a listener is attached: the request path tests the same single flag either way, and continuous executions aren't recorded as they happen but rebuilt from the trades when the events are published, so the matching loop is untouched and the benchmark runs at the same speed. Once warm, publishing them allocates nothing.
 
 `MarketDataFeed` is a ready-made listener that maintains, per symbol:
 
@@ -217,6 +221,8 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   │   └── spin.hpp
 │   ├── fix.hpp
 │   ├── fix_gateway.hpp
+│   ├── itch.hpp
+│   ├── itch_feed.hpp
 │   ├── journal.hpp
 │   ├── latency_histogram.hpp
 │   ├── market_data.hpp
@@ -234,6 +240,8 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── fix.cpp
 │   ├── fix_gateway.cpp
 │   ├── formatting.cpp
+│   ├── itch.cpp
+│   ├── itch_feed.cpp
 │   ├── journal.cpp
 │   ├── market_data.cpp
 │   ├── matching_engine.cpp
@@ -258,6 +266,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── cli_tests.cpp
 │   ├── differential_tests.cpp
 │   ├── fix_tests.cpp
+│   ├── itch_tests.cpp
 │   ├── journal_tests.cpp
 │   ├── market_data_tests.cpp
 │   ├── order_book_tests.cpp
@@ -271,16 +280,19 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │       └── reference_book.hpp
 ├── fuzz/
 │   ├── fix_fuzzer.cpp
+│   ├── itch_fuzzer.cpp
 │   ├── journal_fuzzer.cpp
 │   ├── order_book_fuzzer.cpp
 │   └── standalone_main.cpp
 ├── cmake/
+│   ├── itch_roundtrip.cmake
 │   └── replay_roundtrip.cmake
 └── tools/
     ├── cli_main.cpp
     ├── demo_main.cpp
     ├── fix_client_main.cpp
     ├── fix_gateway_main.cpp
+    ├── itch_main.cpp
     ├── replay_main.cpp
     └── tui_main.cpp
 ```
@@ -624,6 +636,49 @@ Almost all of the round trip is the kernel delivering the bytes and waking each 
 ./build/tradematch_fix_client --bench 100000           # round-trip latency, and the loopback floor beneath it
 ```
 
+## NASDAQ ITCH 5.0
+
+TradeMatch speaks NASDAQ TotalView-ITCH 5.0, the binary order-level feed NASDAQ publishes, in both directions: it publishes its own books as an ITCH feed, and it rebuilds every stock's order book from an ITCH file, NASDAQ's historical data included.
+
+```text
+$ curl -O "https://emi.nasdaq.com/ITCH/Nasdaq%20BX%20ITCH/20191230.BX_ITCH_50.gz"
+$ gunzip -c 20191230.BX_ITCH_50.gz > bx.itch
+$ ./build/tradematch_itch replay bx.itch --at 10:00 --symbol SPY --top 3
+Replayed 4,336,656 messages up to 10:00:00.000 (130 MB read) in 0.389 s: 11.1 million messages/s
+  last timestamp 09:59:59.997, invalid messages 0, anomalies 0
+  by type: A 1,640,564 D 1,584,252 N 527,942 U 386,259 E 58,176 X 51,884 F 36,057 P 18,274 Y 8,932 R 8,906 H 8,906 L 6,171 C 329 S 3 V 1
+  8,906 stocks, 43,493 orders resting at 10:00:00.000 (peak 49,693)
+
+Most traded stocks
+  stock         volume        value ($)   executions        last
+  NIO           298,006          904,480          558      3.1900
+  EEM           249,170       11,232,094          733     45.0400
+  VXX           236,829        3,709,662        1,261     15.7100
+
+SPY at 10:00:00.000, 29 orders resting
+            BID                    ASK
+         100 @ 321.4500           200 @ 321.5000
+         200 @ 321.4300           200 @ 321.5100
+         200 @ 321.4200           200 @ 321.5200
+         100 @ 321.3800           100 @ 321.5800
+         400 @ 321.1700           400 @ 321.7300
+...
+```
+
+**A real trading day.** NASDAQ publishes historical ITCH files at [emi.nasdaq.com/ITCH](https://emi.nasdaq.com/ITCH/). Replaying the whole session of NASDAQ BX on December 30, 2019 (29,156,757 messages for 8,906 stocks, 862 MB) takes 2.1 seconds on the M4, 14 million messages a second. Every message decodes and fits the book it applies to: there are no invalid messages and no anomalies, and every book ends the day empty, as it should. At the busiest moment the replica holds 76,126 resting orders. A day on NASDAQ's main market has about ten times as many messages; `gunzip -c FILE.gz | tradematch_itch replay -` streams one without unpacking it to disk.
+
+**The replica.** `BookReplica` keeps a TradeMatch `OrderBook` per stock, held in auction mode so that it never matches. An exchange feed reports every execution itself, so a book that matched crossing orders would execute them twice. Adds join the back of their queue, executions and partial cancels amend orders in place so they keep their place, replaces re-enter at the back under a new reference, and deletes remove. A message that doesn't fit the books, such as a delete of an order that was never added, is counted as an anomaly rather than trusted.
+
+**Publishing.** `FeedPublisher` turns the book's [order events](#multiple-instruments-and-market-data) into ITCH: a stock directory message for each symbol, then adds, executions, partial cancels, deletes, and replaces. A replace that re-enters the book without trading is a single replace message. Auction executions are non-printable executions whose volume a cross trade message reports. Order references are renewed whenever an order, or an iceberg's next tranche, joins the back of a queue, as ITCH requires. A price the 32-bit price field can't carry, above $429,496.7295 (the ceiling Berkshire Hathaway's class A shares ran into in 2021), is refused rather than wrapped around. `tradematch_itch generate` runs the [market simulator](#live-market-simulator) through one trading day and writes its feed: 2.4 million messages for a 30-minute session of three stocks, in under a second. With `--verify` it then replays the file and checks that every book comes back order for order, under the same references and in the same queue order.
+
+```bash
+./build/tradematch_itch replay day.itch --at 10:00 --symbol AAPL   # the books as of 10:00, and the most traded stocks
+gunzip -c FILE.gz | ./build/tradematch_itch replay -               # straight from NASDAQ's compressed files
+./build/tradematch_itch generate day.itch --minutes 30 --verify    # a simulated day, checked by replaying it
+```
+
+**Tests.** [tests/itch_tests.cpp](tests/itch_tests.cpp) checks an add order against bytes laid out by hand from the specification, that all 23 ITCH 5.0 message types decode at exactly their specified lengths and re-encode byte for byte, and that files stream across block boundaries while a torn last message is reported. The engine's feed must rebuild its book exactly after each of 60,000 adversarial operations (auctions, icebergs, stops, self-trade prevention, replaces, and snapshot restores), and a simulated day must survive the round trip through a file. Volume accounting and each kind of anomaly have their own checks. Since a comparison that never reported a difference would make all of that pass, each kind of difference is also planted in a replica to check that it is found. A fourth fuzz target decodes and re-encodes arbitrary messages, and drives fuzzed order flow through the engine, its feed, and a replica, stopping at the first difference.
+
 ## Example Workflow
 
 The demo executable (`./build/tradematch_demo`) walks through a deterministic scenario:
@@ -705,11 +760,11 @@ The test suite covers deterministic scenarios that matter for correctness:
 - a book that starts with room for one order, one level, and one trade, then grows transparently through a 1,000-trade sweep
 - invariant checks after every submit, cancel, and replace
 
-The market data suite ([tests/market_data_tests.cpp](tests/market_data_tests.cpp)) runs the full random flow (stops, icebergs, self-trade prevention, amends, and expiries) through a book with a listener attached. After every one of 80,000 operations, it checks that a depth replica built only from the published updates equals the engine's own snapshot, and that the streamed trades equal the request's trades. It also covers candle aggregation and interval alignment (including negative times), top of book, VWAP, tape length, gap-free sequencing and timestamps, symbol routing and isolation, unknown symbols, cross-symbol day expiry, and attaching or detaching listeners.
+The market data suite ([tests/market_data_tests.cpp](tests/market_data_tests.cpp)) runs the full random flow (stops, icebergs, self-trade prevention, amends, and expiries) through a book with a listener attached. After every one of 80,000 operations, it checks that a depth replica built only from the published updates equals the engine's own snapshot, and that the streamed trades equal the request's trades. The same flow drives a replica of every queue built only from order events: after each operation its queues must hold the book's orders in the book's order, showing the same quantities, through more than 5,000 iceberg refreshes. It also covers candle aggregation and interval alignment (including negative times), top of book, VWAP, tape length, gap-free sequencing and timestamps, symbol routing and isolation, unknown symbols, cross-symbol day expiry, and attaching or detaching listeners.
 
 Two more suites target the v2 internals:
 
-- **Zero-allocation proof** ([tests/allocation_tests.cpp](tests/allocation_tests.cpp)): replaces global `operator new` to count every heap allocation, replays the benchmark's 1,000,000-operation stream after warm-up, and fails if the engine allocates even once, with or without a write-ahead journal. The v1 baseline is counted on the same stream for comparison: 1.83 million allocations, against 0 for v2.
+- **Zero-allocation proof** ([tests/allocation_tests.cpp](tests/allocation_tests.cpp)): replaces global `operator new` to count every heap allocation, replays the benchmark's 1,000,000-operation stream after warm-up, and fails if the engine allocates even once: with or without a write-ahead journal, and while publishing order events (1.27 million of them). The v1 baseline is counted on the same stream for comparison: 1.83 million allocations, against 0 for v2.
 - **Order index** ([tests/order_index_tests.cpp](tests/order_index_tests.cpp)): 300,000 random inserts and erases over a small key space, checked against `std::unordered_map`. The small key space forces long probe runs, wrap-around, and constant backward-shift deletions. Further cases cover growth, reserved capacity, and the reserved key 0.
 
 The differential test also starts every other seed with a book sized for a single order, level, and trade, so the pools and the index grow constantly while being checked.
@@ -751,14 +806,14 @@ CI runs every suite under ThreadSanitizer as well. Weakening the ring's release 
 
 The command line has its [scenarios](#command-line), checked against golden transcripts, and its own suite ([tests/cli_tests.cpp](tests/cli_tests.cpp)). That suite journals, saves, and loads a session (the journal replays to the same state hash, and IDs continue after a load). It also feeds the interpreter 50,000 random lines built from its own vocabulary and malformed numbers: each must produce output or an error, never an exception or a crash.
 
-The FIX gateway's suite ([tests/fix_tests.cpp](tests/fix_tests.cpp)) is described [with the gateway](#fix-gateway).
+The FIX gateway's suite ([tests/fix_tests.cpp](tests/fix_tests.cpp)) is described [with the gateway](#fix-gateway), and the ITCH suite ([tests/itch_tests.cpp](tests/itch_tests.cpp)) [with ITCH](#nasdaq-itch-50).
 
 ## Differential Testing and Fuzzing
 
 Hand-written scenarios only cover the cases someone thought of. To catch the rest, the engine is checked against a second, deliberately naive implementation ([tests/support/reference_book.hpp](tests/support/reference_book.hpp)). The reference keeps every resting order in one flat vector and finds the best match with a linear scan, so it is slow but easy to verify by reading.
 
 - **Randomized differential test** (`tradematch_differential_tests`): runs 400,000 adversarial operations (200 seeds x 2,000) through both books. The flow uses a narrow price band so orders constantly cross, small sizes so partial fills are common, and a steady stream of invalid, duplicate, and unknown-ID requests. After every operation it compares result flags, quantities, every trade field, the full depth snapshot including FIFO order IDs, and order lookups. Every 89 operations, the engine is also replaced by a brand-new book restored from a binary snapshot of its own state, while the reference carries on untouched, so any state a snapshot fails to capture shows up as a later mismatch. A failure prints the seed, the diverging operation, and a one-line reproduction command.
-- **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow, including snapshot restores, and aborts on the first engine/reference mismatch. A second target ([fuzz/journal_fuzzer.cpp](fuzz/journal_fuzzer.cpp)) feeds arbitrary bytes to everything that reads persisted data: raw journal files, fuzzed commands framed with valid checksums and replayed into an engine, and fuzzed snapshot contents restored into one. Malformed input must be rejected cleanly, and anything accepted must round-trip exactly. A third target ([fuzz/fix_fuzzer.cpp](fuzz/fix_fuzzer.cpp)) does the same for the [FIX gateway](#fix-gateway). CI fuzzes all three for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps every target compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
+- **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow, including snapshot restores, and aborts on the first engine/reference mismatch. A second target ([fuzz/journal_fuzzer.cpp](fuzz/journal_fuzzer.cpp)) feeds arbitrary bytes to everything that reads persisted data: raw journal files, fuzzed commands framed with valid checksums and replayed into an engine, and fuzzed snapshot contents restored into one. Malformed input must be rejected cleanly, and anything accepted must round-trip exactly. A third target ([fuzz/fix_fuzzer.cpp](fuzz/fix_fuzzer.cpp)) does the same for the [FIX gateway](#fix-gateway), and a fourth ([fuzz/itch_fuzzer.cpp](fuzz/itch_fuzzer.cpp)) for [ITCH](#nasdaq-itch-50): decoded messages must re-encode byte for byte, and fuzzed order flow must come back out of the engine's feed exactly. CI fuzzes all four for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps every target compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
 
 The random flow covers call auctions (opened about every 150 operations and uncrossed about 30 later), every time-in-force and post-only combination, stop and stop-limit orders around the trading band, icebergs, and orders from a small pool of owners with random self-trade prevention modes. The reference book shares none of the engine's algorithms. For example, its FOK check simply runs the real match on a throwaway copy of the whole book, which checks the engine's single-pass FOK walk against the real matching path. During call phases, the indicative auction price and volumes are compared after every operation, and the engine's two-pointer equilibrium search is checked against a full scan of the book at every candidate price. Half of all replacements target an order's current price with the same or a smaller size, to exercise in-place amends, and end-of-day expiries are interleaved, with the expired ID lists compared.
 
@@ -792,10 +847,11 @@ make fuzz-long   # 10M-operation soak: 2,000 seeds x 5,000 operations
 
 # Coverage-guided fuzzing (LLVM clang on Linux)
 cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
-cmake --build build-fuzz --target tradematch_fuzzer tradematch_journal_fuzzer tradematch_fix_fuzzer
+cmake --build build-fuzz --target tradematch_fuzzer tradematch_journal_fuzzer tradematch_fix_fuzzer tradematch_itch_fuzzer
 ./build-fuzz/tradematch_fuzzer -max_total_time=60
 ./build-fuzz/tradematch_journal_fuzzer -max_total_time=60
 ./build-fuzz/tradematch_fix_fuzzer -max_total_time=60
+./build-fuzz/tradematch_itch_fuzzer -max_total_time=60
 ```
 
 ## Performance
@@ -871,16 +927,16 @@ Every push runs two workflows:
 | CI | Smoke tests | Every scenario's transcript matches its golden file. `tradematch_benchmark` and `tradematch_pipeline_benchmark` run short workloads, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform. The pipeline benchmark also checks its book against a single-threaded replay |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
-| Fuzz | libFuzzer | Three targets (order flow, journal and snapshot decoding, and the FIX gateway) fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
+| Fuzz | libFuzzer | Four targets (order flow, journal and snapshot decoding, the FIX gateway, and ITCH) fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
 
 ## Why This Project Matters
 
 For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It shows the ability to take a compact but failure-prone codebase and turn it into a cleaner, testable engine with explicit trade-offs, measurable behavior, and documentation that matches reality.
 
-It is also a strong stepping stone for deeper systems work: replaying real exchange feeds, or putting the FIX gateway in front of the multi-threaded pipeline.
+It is also a strong stepping stone for deeper systems work, such as putting the FIX gateway in front of the multi-threaded pipeline, or testing trading strategies against books rebuilt from real NASDAQ data.
 
 ## Future Improvements
 
-- A NASDAQ ITCH replay tool
+- MoldUDP64, the transport that carries ITCH live, alongside its file format
 - FIX resend requests and sequence numbers that persist across reconnects
 - WebAssembly and Python front ends

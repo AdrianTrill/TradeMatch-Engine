@@ -135,8 +135,77 @@ TRADEMATCH_HOT_INLINE void OrderBook::finish_request(SubmitResult& result) {
     result.trades = trades_;
     result.triggered_stops = triggered_;
     result.self_trade_cancels = self_trade_cancels_;
+    if (observed_) [[unlikely]] {
+        publish_all(trades_);
+    }
+}
+
+// A change to a resting order where both kinds of listener need to hear of it: the level for market data, and the
+// order event. While no listener is attached, this is the request path's only test.
+TRADEMATCH_HOT_INLINE void OrderBook::observe(OrderEvent::Type type,
+                                              const OrderNode& node,
+                                              Price price,
+                                              Quantity quantity) {
+    if (observed_) [[unlikely]] {
+        observe_change(type, node, price, quantity);
+    }
+}
+
+TRADEMATCH_COLD void OrderBook::observe_change(OrderEvent::Type type,
+                                               const OrderNode& node,
+                                               Price price,
+                                               Quantity quantity) {
+    touch_level(node.side, price);
+    record_order_event(type, node, price, quantity);
+}
+
+void OrderBook::record_order_event(OrderEvent::Type type,
+                                   const OrderNode& node,
+                                   Price price,
+                                   Quantity quantity,
+                                   TradeId trade_id) {
+    if (order_listener_ != nullptr) {
+        recorded_events_.push_back(
+            RecordedEvent{OrderEvent{type, node.side, node.order_id, price, quantity, trade_id}, trades_.size()});
+    }
+}
+
+TRADEMATCH_COLD void OrderBook::publish_all(std::span<const Trade> trades) {
     if (listener_ != nullptr) {
-        publish(trades_);
+        publish(trades);
+    }
+    if (order_listener_ != nullptr) {
+        publish_order_events(trades);
+    }
+}
+
+// Merges the recorded events with the executions rebuilt from continuous trades, each of which executed the resting
+// side at the trade price. Auction executions are recorded instead, since either side of an auction trade may be a
+// market order that never rested.
+TRADEMATCH_COLD void OrderBook::publish_order_events(std::span<const Trade> trades) {
+    order_events_.clear();
+    std::size_t next = 0;
+    for (std::size_t index = 0; index < trades.size(); ++index) {
+        for (; next < recorded_events_.size() && recorded_events_[next].trades_before <= index; ++next) {
+            order_events_.push_back(recorded_events_[next].event);
+        }
+        const Trade& trade = trades[index];
+        if (!trade.auction) {
+            const bool buyer_rested = trade.aggressor_side == Side::Sell;
+            order_events_.push_back(OrderEvent{OrderEvent::Type::Executed,
+                                               buyer_rested ? Side::Buy : Side::Sell,
+                                               buyer_rested ? trade.buy_order_id : trade.sell_order_id,
+                                               trade.price,
+                                               trade.quantity,
+                                               trade.trade_id});
+        }
+    }
+    for (; next < recorded_events_.size(); ++next) {
+        order_events_.push_back(recorded_events_[next].event);
+    }
+    recorded_events_.clear();
+    if (!order_events_.empty() || !trades.empty()) {
+        order_listener_->on_order_events(order_events_, trades);
     }
 }
 
@@ -295,8 +364,8 @@ CancelResult OrderBook::cancel(OrderId order_id) {
         result.cancelled_quantity = node.remaining + node.hidden;
         result.message = "Order cancelled.";
         remove_resting(node_slot);
-        if (listener_ != nullptr) {
-            publish({});
+        if (observed_) [[unlikely]] {
+            publish_all({});
         }
         return result;
     }
@@ -369,6 +438,9 @@ ReplaceResult OrderBook::replace(const OrderRequest& replacement) {
         replacement.display_quantity == existing.display) {
         const Quantity visible = std::min(existing.remaining, replacement.quantity);
         const Quantity hidden = replacement.quantity - visible;
+        if (visible < existing.remaining) {
+            record_order_event(OrderEvent::Type::Reduced, existing, level.price, existing.remaining - visible);
+        }
         level.total_quantity -= existing.remaining - visible;
         level.hidden_quantity -= existing.hidden - hidden;
         existing.remaining = visible;
@@ -450,8 +522,8 @@ std::vector<OrderId> OrderBook::expire_day_orders() {
         remove_stop(stop_slot);
     }
     std::ranges::sort(expired);
-    if (listener_ != nullptr) {
-        publish({});
+    if (observed_) [[unlikely]] {
+        publish_all({});
     }
     return expired;
 }
@@ -487,8 +559,8 @@ AuctionResult OrderBook::uncross() {
     result.trades = trades_;
     result.expired_market_orders = expired_market_orders_;
     result.triggered_stops = triggered_;
-    if (listener_ != nullptr) {
-        publish(trades_);
+    if (observed_) [[unlikely]] {
+        publish_all(trades_);
     }
     return result;
 }
@@ -611,10 +683,11 @@ TRADEMATCH_COLD std::optional<OrderBook::Equilibrium> OrderBook::find_equilibriu
 // matching. Auction trades have no aggressor.
 TRADEMATCH_COLD void OrderBook::execute_auction(Price price, Volume quantity) {
     // Consumes `fill` from the order at the head of the best level of one side, refreshing or removing it as needed.
-    const auto consume_resting = [this](Ladder& side_ladder, Quantity fill) {
+    const auto consume_resting = [this, price](Ladder& side_ladder, Quantity fill) {
         const Slot level_slot = side_ladder.back().level;
         PriceLevel& level = levels_[level_slot];
         const Slot node_slot = level.head;
+        record_order_event(OrderEvent::Type::Executed, nodes_[node_slot], price, fill, trades_.back().trade_id);
         nodes_[node_slot].remaining -= fill;
         level.total_quantity -= fill;
         touch_level(level.side, level.price);
@@ -837,7 +910,10 @@ TRADEMATCH_COLD void OrderBook::import_state(const BookState& state) {
     // Building a separate book first means that even a failed allocation leaves this one untouched.
     OrderBook rebuilt(capacity);
     rebuilt.load_state(state);
-    rebuilt.listener_ = listener_;
+    rebuilt.set_listener(listener_);
+    rebuilt.set_order_listener(order_listener_);
+    rebuilt.recorded_events_.reserve(recorded_events_.capacity());
+    rebuilt.order_events_.reserve(order_events_.capacity());
     *this = std::move(rebuilt);
 }
 
@@ -1133,6 +1209,7 @@ void OrderBook::match(const OrderRequest& order, Quantity& remaining, bool& stop
 TRADEMATCH_COLD bool OrderBook::prevent_self_trade(SelfTradePrevention mode, Slot node_slot, PriceLevel& level) {
     if (mode != SelfTradePrevention::CancelNewest) {
         self_trade_cancels_.push_back(nodes_[node_slot].order_id);
+        record_order_event(OrderEvent::Type::Deleted, nodes_[node_slot], level.price, nodes_[node_slot].remaining);
         detach_node(node_slot, level);
     }
     return mode != SelfTradePrevention::CancelOldest;
@@ -1148,6 +1225,7 @@ TRADEMATCH_COLD void OrderBook::refresh_iceberg(Slot node_slot, PriceLevel& leve
     node.sequence = next_sequence_++;
     level.hidden_quantity -= tranche;
     level.total_quantity += tranche;
+    record_order_event(OrderEvent::Type::Added, node, level.price, tranche);
 
     if (level.tail == node_slot) {
         return;
@@ -1195,7 +1273,7 @@ void OrderBook::rest(const OrderRequest& order, Quantity remaining, SequenceNumb
     ++level.order_count;
     level.total_quantity += visible;
     level.hidden_quantity += remaining - visible;
-    touch_level(order.side, order.price);
+    observe(OrderEvent::Type::Added, node, order.price, visible);
 
     index_.insert(order.order_id, node_slot);
 }
@@ -1221,10 +1299,11 @@ TRADEMATCH_HOT_INLINE void OrderBook::detach_node(Slot node_slot, PriceLevel& le
     release_node(node_slot);
 }
 
+// Removes an order that leaves the book without trading: a cancel, a replace that re-enters, or an expiry.
 void OrderBook::remove_resting(Slot node_slot) {
     const Slot level_slot = nodes_[node_slot].level;
     PriceLevel& level = levels_[level_slot];
-    touch_level(level.side, level.price);
+    observe(OrderEvent::Type::Deleted, nodes_[node_slot], level.price, nodes_[node_slot].remaining);
     detach_node(node_slot, level);
     if (level.order_count == 0U) {
         remove_level(level_slot);

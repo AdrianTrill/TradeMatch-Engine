@@ -51,6 +51,8 @@ set(TRADEMATCH_ENGINE_SOURCES
     src/fix.cpp
     src/fix_gateway.cpp
     src/formatting.cpp
+    src/itch.cpp
+    src/itch_feed.cpp
     src/journal.cpp
     src/market_data.cpp
     src/matching_engine.cpp
@@ -77,6 +79,9 @@ target_compile_options(tradematch_sim PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-
 
 add_executable(tradematch_tui tools/tui_main.cpp)
 target_link_libraries(tradematch_tui PRIVATE tradematch_sim tradematch_project_options)
+
+add_executable(tradematch_itch tools/itch_main.cpp)
+target_link_libraries(tradematch_itch PRIVATE tradematch_sim tradematch_project_options)
 
 add_executable(tradematch_fix_gateway tools/fix_gateway_main.cpp)
 target_link_libraries(tradematch_fix_gateway PRIVATE tradematch_engine tradematch_project_options)
@@ -130,6 +135,16 @@ if(BUILD_TESTING)
              COMMAND ${CMAKE_COMMAND} -DTUI=$<TARGET_FILE:tradematch_tui> -DREPLAY=$<TARGET_FILE:tradematch_replay>
                      -DJOURNAL=${CMAKE_CURRENT_BINARY_DIR}/replay_roundtrip.tmj -P ${PROJECT_SOURCE_DIR}/cmake/replay_roundtrip.cmake)
 
+    add_executable(tradematch_itch_tests tests/itch_tests.cpp)
+    target_include_directories(tradematch_itch_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(tradematch_itch_tests PRIVATE tradematch_sim tradematch_project_options)
+    add_test(NAME tradematch_itch_tests COMMAND tradematch_itch_tests)
+
+    # Writes a simulated day as an ITCH file, verifies it rebuilds the engine's books, and replays it.
+    add_test(NAME tradematch_itch_roundtrip
+             COMMAND ${CMAKE_COMMAND} -DITCH=$<TARGET_FILE:tradematch_itch>
+                     -DFEED=${CMAKE_CURRENT_BINARY_DIR}/itch_roundtrip.itch -P ${PROJECT_SOURCE_DIR}/cmake/itch_roundtrip.cmake)
+
     add_executable(tradematch_fix_tests tests/fix_tests.cpp)
     target_link_libraries(tradematch_fix_tests PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_fix_tests COMMAND tradematch_fix_tests)
@@ -168,6 +183,11 @@ if(BUILD_TESTING)
     add_executable(tradematch_journal_fuzz_standalone fuzz/journal_fuzzer.cpp fuzz/standalone_main.cpp)
     target_link_libraries(tradematch_journal_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_journal_fuzz_smoke COMMAND tradematch_journal_fuzz_standalone --iterations 3000)
+
+    add_executable(tradematch_itch_fuzz_standalone fuzz/itch_fuzzer.cpp fuzz/standalone_main.cpp)
+    target_include_directories(tradematch_itch_fuzz_standalone PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(tradematch_itch_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_itch_fuzz_smoke COMMAND tradematch_itch_fuzz_standalone --iterations 2000)
 
     add_executable(tradematch_fix_fuzz_standalone fuzz/fix_fuzzer.cpp fuzz/standalone_main.cpp)
     target_link_libraries(tradematch_fix_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
@@ -210,6 +230,7 @@ if(TRADEMATCH_LIBFUZZER)
     tradematch_add_fuzzer(tradematch_fuzzer fuzz/order_book_fuzzer.cpp)
     tradematch_add_fuzzer(tradematch_journal_fuzzer fuzz/journal_fuzzer.cpp)
     tradematch_add_fuzzer(tradematch_fix_fuzzer fuzz/fix_fuzzer.cpp)
+    tradematch_add_fuzzer(tradematch_itch_fuzzer fuzz/itch_fuzzer.cpp)
     if(WIN32)
         target_link_libraries(tradematch_fuzzer PRIVATE ws2_32)
     endif()

@@ -89,6 +89,17 @@ std::size_t apply(Book& book, const Command& command) {
     return 0;
 }
 
+// Counts order events, so that publishing them can be checked for allocations too.
+class CountingOrderListener final : public tradematch::OrderEventListener {
+public:
+    void on_order_events(std::span<const tradematch::OrderEvent> events,
+                         std::span<const tradematch::Trade> /*trades*/) override {
+        count += events.size();
+    }
+
+    std::size_t count{0};
+};
+
 // Replays warm-up untracked, then counts allocations over the measured segment.
 template <typename Book>
 std::uint64_t count_allocations(Book& book, std::span<const Command> warmup, std::span<const Command> measured) {
@@ -125,6 +136,11 @@ int run() {
     auto v2 = std::make_unique<tradematch::OrderBook>(capacity);
     const auto v2_allocations = count_allocations(*v2, warmup, measured);
 
+    auto observed = std::make_unique<tradematch::OrderBook>(capacity);
+    CountingOrderListener order_events;
+    observed->set_order_listener(&order_events);
+    const auto observed_allocations = count_allocations(*observed, warmup, measured);
+
     std::random_device device;
     const auto journal_path =
         std::filesystem::temp_directory_path() / ("tradematch-allocation-test-" + std::to_string(device()) + ".tmj");
@@ -148,8 +164,14 @@ int run() {
     std::cout << "  v2           " << v2_allocations << " (" << per_operation(v2_allocations) << " per operation)\n";
     std::cout << "  v2 + journal " << journaled_allocations << " (" << per_operation(journaled_allocations)
               << " per operation)\n";
+    std::cout << "  v2 + order events " << observed_allocations << " (" << per_operation(observed_allocations)
+              << " per operation, " << order_events.count << " events published)\n";
 
-    if (v2_allocations != 0 || journaled_allocations != 0) {
+    if (order_events.count == 0U) {
+        std::cout << "[FAIL] the order listener heard nothing\n";
+        return 1;
+    }
+    if (v2_allocations != 0 || journaled_allocations != 0 || observed_allocations != 0) {
         std::cout << "[FAIL] the v2 request path allocated on the heap\n";
         return 1;
     }
@@ -157,7 +179,8 @@ int run() {
         std::cout << "[FAIL] allocation counting is not working: the v1 baseline should allocate\n";
         return 1;
     }
-    std::cout << "[PASS] the v2 engine performed zero heap allocations in steady state, journaled or not\n";
+    std::cout << "[PASS] the v2 engine performed zero heap allocations in steady state, journaled or publishing "
+                 "order events alike\n";
     return 0;
 }
 

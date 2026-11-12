@@ -52,6 +52,9 @@ jobs:
           # FIX parsing, session handling, and order entry.
           - target: tradematch_fix_fuzzer
             corpus: fix
+          # ITCH 5.0 decoding and replay, and the engine's feed rebuilding its book.
+          - target: tradematch_itch_fuzzer
+            corpus: itch
     env:
       # Short smoke runs on every push, a longer nightly campaign, and a configurable manual budget.
       FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1200' || inputs.seconds || '60' }}

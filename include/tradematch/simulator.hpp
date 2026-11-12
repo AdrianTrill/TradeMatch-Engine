@@ -95,6 +95,12 @@ public:
         return engine_;
     }
 
+    // Attaches an order-level (L3) listener to the simulated exchange, such as an ITCH feed publisher, or detaches it
+    // with nullptr.
+    void set_order_listener(OrderFeedListener* listener) {
+        engine_.set_order_listener(listener);
+    }
+
     // Flushes the journal and writes a snapshot of the engine; see JournaledEngine::save_snapshot().
     std::uint64_t save_snapshot(const std::filesystem::path& path) {
         return journaled_.save_snapshot(path);

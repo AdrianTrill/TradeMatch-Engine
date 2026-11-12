@@ -9,6 +9,7 @@ MatchingEngine::~MatchingEngine() {
     // Detach first so no book ever calls into a destroyed forwarder.
     for (auto& instrument : instruments_) {
         instrument.book->set_listener(nullptr);
+        instrument.book->set_order_listener(nullptr);
     }
 }
 
@@ -17,7 +18,8 @@ SymbolId MatchingEngine::add_symbol(std::string_view name, const BookCapacity& c
         return *existing;
     }
     const auto symbol = static_cast<SymbolId>(instruments_.size());
-    instruments_.push_back(Instrument{std::string{name}, capacity, std::make_unique<OrderBook>(capacity), nullptr});
+    instruments_.push_back(
+        Instrument{std::string{name}, capacity, std::make_unique<OrderBook>(capacity), nullptr, nullptr});
     attach(instruments_.back(), symbol);
     return symbol;
 }
@@ -98,14 +100,28 @@ void MatchingEngine::set_listener(MarketDataListener* listener) {
     }
 }
 
+void MatchingEngine::set_order_listener(OrderFeedListener* listener) {
+    order_listener_ = listener;
+    for (SymbolId symbol = 0; symbol < instruments_.size(); ++symbol) {
+        attach(instruments_[symbol], symbol);
+    }
+}
+
 void MatchingEngine::attach(Instrument& instrument, SymbolId symbol) {
     if (listener_ == nullptr) {
         instrument.book->set_listener(nullptr);
         instrument.forwarder.reset();
-        return;
+    } else {
+        instrument.forwarder = std::make_unique<Forwarder>(symbol, listener_);
+        instrument.book->set_listener(instrument.forwarder.get());
     }
-    instrument.forwarder = std::make_unique<Forwarder>(symbol, listener_);
-    instrument.book->set_listener(instrument.forwarder.get());
+    if (order_listener_ == nullptr) {
+        instrument.book->set_order_listener(nullptr);
+        instrument.order_forwarder.reset();
+    } else {
+        instrument.order_forwarder = std::make_unique<OrderForwarder>(symbol, order_listener_);
+        instrument.book->set_order_listener(instrument.order_forwarder.get());
+    }
 }
 
 }  // namespace tradematch

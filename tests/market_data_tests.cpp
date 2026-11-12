@@ -3,11 +3,16 @@
 #include "tradematch/matching_engine.hpp"
 #include "tradematch/order_book.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -52,6 +57,128 @@ bool same_trades(std::span<const tradematch::Trade> left, const std::vector<trad
     });
 }
 
+// An order-level (L3) replica: the queue of orders at each price level and what each shows, maintained purely from
+// order events. It also checks every event against what came before it.
+class OrderReplica final : public tradematch::OrderEventListener {
+public:
+    void on_order_events(std::span<const tradematch::OrderEvent> events,
+                         std::span<const tradematch::Trade> trades) override {
+        previous.reset();
+        for (const tradematch::OrderEvent& event : events) {
+            apply(event);
+            previous = event;
+        }
+        streamed_trades.assign(trades.begin(), trades.end());
+        ++batches;
+    }
+
+    void expect_matches(const tradematch::OrderBook& book, std::size_t step) const {
+        const auto snapshot = book.snapshot();
+        const std::string where = " at step " + std::to_string(step);
+        std::size_t levels = 0;
+        for (const auto& [side, book_levels] :
+             {std::pair{Side::Buy, &snapshot.bids}, std::pair{Side::Sell, &snapshot.asks}}) {
+            for (const tradematch::PriceLevelView& level : *book_levels) {
+                const auto queue = queues.find({side, level.price});
+                expect(queue != queues.end() && queue->second == level.order_ids,
+                       "The replica's queue should hold the book's orders in the book's order" + where);
+                tradematch::Volume shown = 0;
+                for (const tradematch::OrderId order_id : queue->second) {
+                    shown += orders.at(order_id).shown;
+                }
+                expect(shown == level.total_quantity, "The replica's level should show the book's quantity" + where);
+                ++levels;
+            }
+        }
+        expect(levels == queues.size(), "The replica should have no levels the book lacks" + where);
+    }
+
+    std::array<std::size_t, 4> counts{};  // by event type
+    std::size_t refreshes{0};             // iceberg tranches shown right after the previous one traded away
+    std::size_t batches{0};
+    std::vector<tradematch::Trade> streamed_trades;
+
+private:
+    struct Order {
+        Side side;
+        tradematch::Price price;
+        tradematch::Quantity shown;
+    };
+
+    void apply(const tradematch::OrderEvent& event) {
+        using Type = tradematch::OrderEvent::Type;
+        ++counts.at(static_cast<std::size_t>(event.type));
+        if (event.type == Type::Added) {
+            expect(event.quantity > 0U && !orders.contains(event.order_id),
+                   "Only an order that isn't showing can be added.");
+            refreshes += previous && previous->type == Type::Executed && previous->order_id == event.order_id ? 1U : 0U;
+            orders.emplace(event.order_id, Order{event.side, event.price, event.quantity});
+            queues[{event.side, event.price}].push_back(event.order_id);
+            return;
+        }
+
+        const auto found = orders.find(event.order_id);
+        expect(found != orders.end() && found->second.side == event.side, "Events should name a showing order.");
+        Order& order = found->second;
+        if (event.type == Type::Deleted) {
+            expect(event.quantity == order.shown && event.price == order.price, "A delete names what was shown.");
+            order.shown = 0;
+        } else {
+            expect(event.quantity > 0U && event.quantity <= order.shown, "Only shown quantity trades or is reduced.");
+            expect(event.type == Type::Executed || event.price == order.price, "A reduction keeps the price.");
+            order.shown -= event.quantity;
+            expect(event.type == Type::Executed || order.shown > 0U, "A reduction leaves the order in the book.");
+        }
+        if (order.shown == 0U) {
+            const std::pair key{order.side, order.price};
+            auto& queue = queues.at(key);
+            std::erase(queue, event.order_id);
+            if (queue.empty()) {
+                queues.erase(key);
+            }
+            orders.erase(found);
+        }
+    }
+
+    std::map<tradematch::OrderId, Order> orders;
+    std::map<std::pair<Side, tradematch::Price>, std::vector<tradematch::OrderId>> queues;
+    std::optional<tradematch::OrderEvent> previous;
+};
+
+// Applies one generated operation to the book and the generator's view of it, returning the trades it reported.
+std::span<const tradematch::Trade> apply_operation(tradematch::OrderBook& book,
+                                                   tradematch::testing::ReferenceBook& generator_view,
+                                                   const tradematch::testing::Operation& op) {
+    using tradematch::testing::OpKind;
+    switch (op.kind) {
+        case OpKind::Submit:
+            generator_view.submit(op.order);
+            return book.submit(op.order).trades;
+        case OpKind::Cancel:
+            book.cancel(op.order.order_id);
+            generator_view.cancel(op.order.order_id);
+            return {};
+        case OpKind::Replace:
+            generator_view.replace(op.order);
+            return book.replace(op.order).submit_result.trades;
+        case OpKind::ExpireDay:
+            book.expire_day_orders();
+            generator_view.expire_day_orders();
+            return {};
+        case OpKind::BeginAuction:
+            book.begin_auction();
+            generator_view.begin_auction();
+            return {};
+        case OpKind::Uncross:
+            generator_view.uncross();
+            return book.uncross().trades;
+        case OpKind::Snapshot:
+            book.import_state(book.export_state());
+            return {};
+    }
+    return {};
+}
+
 void expect_replica_matches(const tradematch::OrderBook& book, const tradematch::DepthBook& replica, std::size_t step) {
     const auto snapshot = book.snapshot();
     const auto compare = [&](const std::vector<tradematch::PriceLevelView>& expected, Side side) {
@@ -84,36 +211,7 @@ void test_depth_replica_tracks_the_engine_exactly() {
             const auto op =
                 step % 97 == 96 ? tradematch::testing::Operation{OpKind::Snapshot, {}} : generator.next(generator_view);
             listener.trades.clear();
-            std::span<const tradematch::Trade> result_trades;
-            switch (op.kind) {
-                case OpKind::Submit:
-                    result_trades = book.submit(op.order).trades;
-                    generator_view.submit(op.order);
-                    break;
-                case OpKind::Cancel:
-                    book.cancel(op.order.order_id);
-                    generator_view.cancel(op.order.order_id);
-                    break;
-                case OpKind::Replace:
-                    result_trades = book.replace(op.order).submit_result.trades;
-                    generator_view.replace(op.order);
-                    break;
-                case OpKind::ExpireDay:
-                    book.expire_day_orders();
-                    generator_view.expire_day_orders();
-                    break;
-                case OpKind::BeginAuction:
-                    book.begin_auction();
-                    generator_view.begin_auction();
-                    break;
-                case OpKind::Uncross:
-                    result_trades = book.uncross().trades;
-                    generator_view.uncross();
-                    break;
-                case OpKind::Snapshot:
-                    book.import_state(book.export_state());
-                    break;
-            }
+            const auto result_trades = apply_operation(book, generator_view, op);
             expect(same_trades(result_trades, listener.trades), "Streamed trades should equal the result's trades.");
             expect_replica_matches(book, listener.replica, step);
         }
@@ -123,14 +221,51 @@ void test_depth_replica_tracks_the_engine_exactly() {
     expect(total_updates > 20'000, "The flow should produce plenty of level updates.");
 }
 
+void test_order_events_rebuild_every_queue_exactly() {
+    using tradematch::testing::OpKind;
+    std::array<std::size_t, 4> totals{};
+    std::size_t refreshes = 0;
+
+    for (std::uint64_t seed = 1; seed <= 40; ++seed) {
+        tradematch::OrderBook book;
+        tradematch::testing::ReferenceBook generator_view;
+        tradematch::testing::OperationGenerator generator(seed);
+        OrderReplica replica;
+        book.set_order_listener(&replica);
+
+        for (std::size_t step = 0; step < 2'000; ++step) {
+            // Restoring the book in place from its own state must keep the order listener attached too.
+            const auto op =
+                step % 97 == 96 ? tradematch::testing::Operation{OpKind::Snapshot, {}} : generator.next(generator_view);
+            replica.streamed_trades.clear();
+            const auto result_trades = apply_operation(book, generator_view, op);
+            expect(same_trades(result_trades, replica.streamed_trades),
+                   "The trades sent with order events should equal the result's trades.");
+            replica.expect_matches(book, step);
+        }
+        for (std::size_t type = 0; type < totals.size(); ++type) {
+            totals.at(type) += replica.counts.at(type);
+        }
+        refreshes += replica.refreshes;
+    }
+    std::cout << "       " << totals[0] << " added, " << totals[1] << " executed, " << totals[2] << " reduced, "
+              << totals[3] << " deleted, " << refreshes << " iceberg refreshes\n";
+    expect(std::ranges::all_of(totals, [](std::size_t count) { return count > 100U; }) && refreshes > 100U,
+           "The flow should produce every kind of order event, iceberg refreshes included.");
+}
+
 void test_detached_book_publishes_nothing() {
     tradematch::OrderBook book;
     ReplicaListener listener;
+    OrderReplica replica;
     book.set_listener(&listener);
+    book.set_order_listener(&replica);
     book.submit({1, Side::Buy, OrderType::Limit, 10, 10000});
     book.set_listener(nullptr);
+    book.set_order_listener(nullptr);
     book.submit({2, Side::Sell, OrderType::Limit, 10, 10000});
     expect(listener.updates == 1U && listener.trades.empty(), "A detached book should stay silent.");
+    expect(replica.batches == 1U && replica.counts[0] == 1U, "A detached book should record no order events.");
 }
 
 void test_candles_aggregate_trades_by_interval() {
@@ -198,11 +333,27 @@ void test_feed_builds_views_and_sequences_messages() {
     expect(feed.drain_messages().empty(), "Draining clears the log.");
 }
 
+// Records order events with the symbol they came from.
+class SymbolOrderLog final : public tradematch::OrderFeedListener {
+public:
+    void on_order_events(tradematch::SymbolId symbol,
+                         std::span<const tradematch::OrderEvent> events,
+                         std::span<const tradematch::Trade> /*trades*/) override {
+        for (const tradematch::OrderEvent& event : events) {
+            log.emplace_back(symbol, event);
+        }
+    }
+
+    std::vector<std::pair<tradematch::SymbolId, tradematch::OrderEvent>> log;
+};
+
 void test_engine_routes_symbols_independently() {
     tradematch::MatchingEngine engine;
     tradematch::MarketDataFeed feed;
+    SymbolOrderLog orders;
     const auto acme = engine.add_symbol("ACME");
     engine.set_listener(&feed);  // attaching after a symbol exists must cover it too
+    engine.set_order_listener(&orders);
     const auto beta = engine.add_symbol("BETA");
 
     expect(engine.add_symbol("ACME") == acme, "Adding a symbol twice returns the same ID.");
@@ -214,6 +365,9 @@ void test_engine_routes_symbols_independently() {
     expect(other.accepted && other.trades.empty(), "Books are isolated, so the same ID and price do not trade.");
     expect(feed.top_of_book(acme).ask_price == 10000 && !feed.top_of_book(acme).bid_price, "ACME has only an ask.");
     expect(feed.top_of_book(beta).bid_price == 10000 && !feed.top_of_book(beta).ask_price, "BETA has only a bid.");
+    expect(orders.log.size() == 2U && orders.log[0].first == acme && orders.log[0].second.side == Side::Sell &&
+               orders.log[1].first == beta && orders.log[1].second.side == Side::Buy,
+           "Order events should carry the symbol of the book they came from.");
 
     const auto unknown = engine.submit(7, {2, Side::Buy, OrderType::Limit, 10, 10000});
     expect(unknown.reject_reason == tradematch::RejectReason::UnknownSymbol, "Unknown symbols are rejected.");
@@ -229,11 +383,17 @@ void test_engine_routes_symbols_independently() {
     expect(expired.size() == 1U && expired.front() == std::pair<tradematch::SymbolId, tradematch::OrderId>{beta, 2},
            "Day expiry runs across every symbol.");
     expect(feed.depth(beta).level_count(Side::Buy) == 1U, "The feed sees the expiry.");
+    expect(orders.log.back().first == beta && orders.log.back().second.type == tradematch::OrderEvent::Type::Deleted &&
+               orders.log.back().second.order_id == 2U,
+           "An expired order should be reported deleted.");
 
     engine.set_listener(nullptr);
+    engine.set_order_listener(nullptr);
+    const std::size_t logged = orders.log.size();
     engine.submit(acme, {3, Side::Buy, OrderType::Limit, 10, 10000});
     expect(feed.top_of_book(acme).ask_price == 10000, "A detached feed keeps its last state.");
     expect(engine.book(acme).order_count() == 0U, "The trade still happened in the engine.");
+    expect(orders.log.size() == logged, "A detached order listener hears nothing more.");
 }
 
 struct TestCase {
@@ -244,6 +404,7 @@ struct TestCase {
 int run_all_tests() {
     const std::vector<TestCase> tests = {
         {"depth_replica_tracks_the_engine_exactly", test_depth_replica_tracks_the_engine_exactly},
+        {"order_events_rebuild_every_queue_exactly", test_order_events_rebuild_every_queue_exactly},
         {"detached_book_publishes_nothing", test_detached_book_publishes_nothing},
         {"candles_aggregate_trades_by_interval", test_candles_aggregate_trades_by_interval},
         {"feed_builds_views_and_sequences_messages", test_feed_builds_views_and_sequences_messages},

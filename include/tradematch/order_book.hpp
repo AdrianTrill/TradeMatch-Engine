@@ -76,6 +76,14 @@ public:
     // no listener is attached.
     void set_listener(BookListener* listener) noexcept {
         listener_ = listener;
+        observed_ = listener_ != nullptr || order_listener_ != nullptr;
+    }
+
+    // Attaches an order-level (L3) listener (or detaches it with nullptr). The book records no order events while no
+    // listener is attached. Its buffers grow to the busiest request's needs and are then reused.
+    void set_order_listener(OrderEventListener* listener) noexcept {
+        order_listener_ = listener;
+        observed_ = listener_ != nullptr || order_listener_ != nullptr;
     }
 
     bool has_order(OrderId order_id) const noexcept;
@@ -201,6 +209,15 @@ private:
     void finish_request(SubmitResult& result);
     void touch_level(Side side, Price price);
     void publish(std::span<const Trade> trades);
+    void observe(OrderEvent::Type type, const OrderNode& node, Price price, Quantity quantity);
+    void observe_change(OrderEvent::Type type, const OrderNode& node, Price price, Quantity quantity);
+    void record_order_event(OrderEvent::Type type,
+                            const OrderNode& node,
+                            Price price,
+                            Quantity quantity,
+                            TradeId trade_id = 0);
+    void publish_order_events(std::span<const Trade> trades);
+    void publish_all(std::span<const Trade> trades);
     Rejection validate(const OrderRequest& order, bool replacing) const noexcept;
     static Rejection validate_advanced(const OrderRequest& order) noexcept;
     void execute(const OrderRequest& order, SubmitResult& result);
@@ -268,6 +285,17 @@ private:
     std::vector<TouchedLevel> touched_levels_;
     SequenceNumber next_sequence_{1};
     TradeId next_trade_id_{1};
+
+    // Order events. Continuous executions aren't recorded: publishing rebuilds them from the trades, and slots the
+    // recorded events in between by how many trades came before each.
+    struct RecordedEvent {
+        OrderEvent event;
+        std::size_t trades_before{};
+    };
+    OrderEventListener* order_listener_{nullptr};
+    bool observed_{false};  // either listener is attached, so the request path tests one flag for both
+    std::vector<RecordedEvent> recorded_events_;
+    std::vector<OrderEvent> order_events_;
 };
 
 }  // namespace tradematch
