@@ -25,6 +25,9 @@
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5.5 12.5 4 4 9-9.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 8.5V7a2.5 2.5 0 0 0-2.5-2.5H7A2.5 2.5 0 0 0 4.5 7v6A2.5 2.5 0 0 0 7 15.5h1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-clear" viewBox="0 0 24 24"><path d="M5 7h14M10 4.5h4M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M10.5 10.5v6M13.5 10.5v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   </svg>
 
@@ -257,17 +260,33 @@
     </main>
 
     <main id="terminal" class="view terminal" hidden>
-      <div class="examples">
-        <span class="examples-label">Run an example</span>
+      <aside class="panel examples-panel" aria-label="Examples">
+        <header class="panel-head">
+          <h2>Examples</h2>
+          <span class="panel-note">Replayed as if typed</span>
+        </header>
         <div id="examples"></div>
-      </div>
-      <div class="console">
-        <pre id="output"></pre>
+        <p class="examples-note">Each one is a golden scenario from
+          <a href="https://github.com/AdrianTrill/TradeMatch-Engine/tree/main/tests/scenarios" target="_blank" rel="noopener">tests/scenarios</a>:
+          CI replays it and checks the output byte for byte.</p>
+      </aside>
+      <section class="console" aria-label="Command line">
+        <header class="console-head">
+          <span class="console-lights" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="console-title"><svg class="icon"><use href="#i-terminal"/></svg>tradematch_cli<span class="faint">WebAssembly · one session</span></span>
+          <span class="console-actions">
+            <button class="button ghost small" id="console-copy" type="button" title="Copy the session"><svg class="icon"><use href="#i-copy"/></svg>Copy</button>
+            <button class="button ghost small" id="console-clear" type="button" title="Clear the screen (Ctrl+L)"><svg class="icon"><use href="#i-clear"/></svg>Clear</button>
+          </span>
+        </header>
+        <pre id="output" role="log" aria-label="Session"></pre>
         <form id="prompt" autocomplete="off">
           <label for="command">›</label>
-          <input id="command" spellcheck="false" placeholder="type help, or an order such as: buy ACME 100 @ 100.50">
+          <input id="command" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="type help, or an order such as: buy ACME 100 @ 100.50">
+          <kbd class="enter" aria-hidden="true">↵</kbd>
         </form>
-      </div>
+        <div id="command-hint" class="command-hint"></div>
+      </section>
     </main>
 
     <footer class="statusbar">

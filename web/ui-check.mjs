@@ -229,13 +229,26 @@ await check('the symbols and speeds switch', async () => {
   expect(await page.$eval('#speed', (menu) => menu.hidden), 'the speed menu should close');
 });
 
-await check('the command line runs an example', async () => {
+await check('the command line plays an example in color, and completes commands', async () => {
   await page.click('.view-tab[data-view="terminal"]');
   await page.click('#examples button:first-child');
   await page.waitForFunction(() => document.querySelector('#output').textContent.includes('The session stays open'),
-    { timeout: 15_000 });
+    { timeout: 20_000 });
   const output = await read('#output');
   expect(output.includes('trade #1  70 @ 100.25  buy #3  sell #4'), 'the price-time priority example should trade');
+  expect(await page.$('#examples .example.played:first-child') !== null, 'the example should be marked as played');
+  expect(await page.$('#output .t-trade') !== null && await page.$('#output .t-side.t-sell') !== null,
+    'trades and order sides should be colored');
+  await page.type('#command', 'boo');
+  await page.keyboard.press('Tab');
+  const completed = await page.$eval('#command', (input) => input.value);
+  expect(completed === 'book ', `Tab completed boo to "${completed}"`);
+  const hint = await read('#command-hint');
+  expect(hint.includes('book [SYMBOL] [LEVELS]'), `the hint: ${hint}`);
+  await page.keyboard.press('Enter');
+  await sleep(100);
+  expect((await read('#output')).includes('ACME  CONTINUOUS  last 100.00  resting 1'),
+    'book should run in the session the example left');
   await screenshot('command-line');
   await page.click('.view-tab[data-view="market"]');
 });

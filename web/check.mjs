@@ -168,12 +168,49 @@ market.delete();
 
 const terminal = new tradematch.Terminal();
 const reply = terminal.run('add ACME') + terminal.run('buy ACME 10 @ 100.00');
+const help = terminal.run('help');
 terminal.delete();
 if (reply.includes('ACME #1 BUY 10 @ 100.00')) {
   console.log('[PASS] terminal keeps its session from command to command');
 } else {
   failures += 1;
   console.log(`[FAIL] terminal: ${reply}`);
+}
+
+// The command line colors what the interpreter prints. Cut into pieces, every line of every golden transcript, and
+// of help, must join back into exactly itself, and the pieces must recognize everything the transcripts say.
+{
+  const { Highlighter, command } = await import(pathToFileURL(resolve(siteDir, 'js/highlight.js')).href);
+  const highlighter = new Highlighter();
+  const problems = [];
+  const kinds = new Set();
+  const colored = (lines, pieces) => pieces.forEach((line, index) => {
+    if (line.map(([text]) => text).join('') !== lines[index]) {
+      problems.push(`"${lines[index]}" came back as "${line.map(([text]) => text).join('')}"`);
+    }
+    line.forEach(([, kind]) => kinds.add(kind));
+  });
+  for (const name of readdirSync(scenarioDir).filter((file) => file.endsWith('.expected')).sort()) {
+    const transcript = readFileSync(join(scenarioDir, name), 'utf8').replaceAll('\r', '');
+    // Each "> command" line, then everything up to the next one.
+    for (const [, typed, printed] of transcript.matchAll(/^> (.*)\n((?:(?!> ).*\n)*)/gm)) {
+      colored([typed], [command(typed)]);
+      const lines = printed.replace(/\n$/, '').split('\n');
+      colored(lines, highlighter.output(printed, typed.split(' ')[0]));
+    }
+  }
+  colored(help.replace(/\n$/, '').split('\n'), highlighter.output(help, 'help'));
+  const missing = ['buy side', 'sell side', 'buy', 'sell', 'trade', 'ok', 'rest', 'wait', 'warn', 'error', 'phase',
+    'phase auction', 'comment', 'symbol', 'heading', 'arg', 'keyword'].filter((kind) => !kinds.has(kind));
+  if (missing.length > 0) {
+    problems.push(`nothing was colored as ${missing.join(', ')}`);
+  }
+  if (problems.length === 0) {
+    console.log(`[PASS] the command line's colors keep every character, in ${kinds.size} kinds`);
+  } else {
+    failures += 1;
+    console.log(`[FAIL] the command line's colors: ${problems.slice(0, 3).join('; ')}`);
+  }
 }
 
 process.exit(failures === 0 ? 0 : 1);

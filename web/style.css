@@ -2019,96 +2019,504 @@ input.inline {
 /* Command line --------------------------------------------------------------------------------------------------- */
 
 .view.terminal {
-  display: flex;
+  display: grid;
   flex: 1;
-  flex-direction: column;
+  grid-template-columns: 300px minmax(0, 1fr);
   gap: var(--gap);
   min-height: 0;
   padding: var(--gap);
 }
 
-.examples {
+#examples {
+  display: grid;
+  flex: 1;
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: 6px;
+  min-height: 0;
+  padding: 10px;
+  overflow-y: auto;
+}
+
+.example {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  padding: 9px 12px 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-raised);
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s var(--ease);
+}
+
+.example:hover {
+  border-color: var(--border-strong);
+  background: linear-gradient(var(--hover), var(--hover)), var(--surface-raised);
+}
+
+.example:active {
+  transform: scale(0.99);
+}
+
+.example.running {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: linear-gradient(120deg, var(--accent-soft), transparent 75%), var(--surface-raised);
+}
+
+.example-head {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
 }
 
-.examples-label {
-  color: var(--muted);
-}
-
-#examples {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-#examples button {
-  height: 30px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--text-2);
-  font-weight: 500;
-}
-
-#examples button:hover {
-  border-color: var(--accent);
+.example-title {
   color: var(--text);
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.example-state {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+  transition: background 0.2s, color 0.2s;
+}
+
+.example-state > * {
+  grid-area: 1 / 1;
+}
+
+.example-state .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.example-state .play {
+  margin-left: 1px;
+}
+
+.example-state .done,
+.example-state .bars,
+.example.played .example-state .play,
+.example.running .example-state .play,
+.example.running .example-state .done {
+  display: none;
+}
+
+.example.played .example-state {
+  background: var(--buy-soft);
+  color: var(--buy);
+}
+
+.example.played .example-state .done {
+  display: block;
+}
+
+.example.running .example-state .bars {
+  display: flex;
+}
+
+.bars {
+  align-items: flex-end;
+  gap: 2px;
+  height: 10px;
+}
+
+.bars i {
+  width: 2px;
+  height: 100%;
+  border-radius: 1px;
+  background: currentColor;
+  transform-origin: bottom;
+  animation: bars 0.9s var(--ease) infinite;
+}
+
+.bars i:nth-child(2) {
+  animation-delay: -0.3s;
+}
+
+.bars i:nth-child(3) {
+  animation-delay: -0.6s;
+}
+
+@keyframes bars {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.example-text {
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.example-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.example.running .example-meta {
+  color: var(--accent);
+}
+
+.example-progress {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: calc(var(--progress, 0) * 100%);
+  height: 2px;
+  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+  opacity: 0;
+  transition: width 0.3s var(--ease), opacity 0.3s;
+}
+
+.example.running .example-progress {
+  opacity: 1;
+}
+
+.examples-note {
+  flex: none;
+  margin: 0;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.examples-note a {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .console {
+  --console-pad: 20px;
   display: flex;
-  flex: 1;
   flex-direction: column;
-  min-height: 420px;
+  min-width: 0;
+  min-height: 0;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface-sunken);
   box-shadow: var(--shadow);
-  font-family: var(--font-mono);
-  font-size: 12.5px;
+}
+
+.console-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 14px;
+  height: 42px;
+  padding: 0 8px 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--panel-sheen), transparent), var(--surface);
+}
+
+.console-lights {
+  display: flex;
+  gap: 7px;
+}
+
+.console-lights i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--sell);
+  opacity: 0.75;
+}
+
+.console-lights i:nth-child(2) {
+  background: var(--auction);
+}
+
+.console-lights i:nth-child(3) {
+  background: var(--buy);
+}
+
+.console-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: 600 12px var(--font-mono);
+  white-space: nowrap;
+}
+
+.console-title .icon {
+  color: var(--accent);
+}
+
+.console-title .faint {
+  margin-left: 4px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border-strong);
+  color: var(--muted);
+  font: 400 12px var(--font-ui);
+}
+
+.console-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.button.small {
+  height: 28px;
+  padding: 0 10px;
+  border-color: transparent;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.button.small .icon {
+  width: 14px;
+  height: 14px;
 }
 
 #output {
   flex: 1;
   min-height: 0;
   margin: 0;
-  padding: 16px 18px;
+  padding: 14px var(--console-pad) 18px;
   overflow-y: auto;
+  color: var(--text-2);
+  font: 12.5px/1.6 var(--font-mono);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-#output .command {
+.t-line {
+  display: block;
+  min-height: 1.6em;
+}
+
+.t-echo {
+  margin: 12px calc(-1 * var(--console-pad)) 3px;
+  padding: 3px var(--console-pad);
+  background: linear-gradient(90deg, var(--accent-soft), transparent 75%);
+  box-shadow: inset 2px 0 0 var(--accent);
+  color: var(--text);
+}
+
+.t-echo:first-child {
+  margin-top: 0;
+}
+
+.t-fail {
+  margin: 0 calc(-1 * var(--console-pad));
+  padding: 0 var(--console-pad);
+  background: linear-gradient(90deg, var(--sell-soft), transparent 70%);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--sell) 70%, transparent);
+}
+
+.t-prompt,
+.t-keyword {
   color: var(--accent);
 }
 
-#output .comment {
+.t-prompt,
+.t-side,
+.t-label,
+.t-symbol,
+.t-heading {
+  font-weight: 700;
+}
+
+.t-buy,
+.t-ok {
+  color: var(--buy);
+}
+
+.t-sell,
+.t-error {
+  color: var(--sell);
+}
+
+.t-dim {
   color: var(--muted);
+}
+
+.t-dim.t-buy,
+.t-dim.t-sell {
+  opacity: 0.7;
+}
+
+.t-dim.t-buy {
+  color: var(--buy);
+}
+
+.t-dim.t-sell {
+  color: var(--sell);
+}
+
+.t-comment {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.t-strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.t-symbol,
+.t-heading {
+  color: var(--text);
+}
+
+.t-rest {
+  color: var(--accent);
+}
+
+.t-wait,
+.t-warn {
+  color: var(--auction);
+}
+
+.t-arg {
+  color: var(--fair);
+}
+
+.t-trade {
+  color: var(--vwap);
+}
+
+.t-phase {
+  border-radius: 3px;
+  background: var(--buy-soft);
+  box-shadow: 0 0 0 2px var(--buy-soft);
+  color: var(--buy);
+  font-weight: 600;
+}
+
+.t-phase.t-auction {
+  background: var(--auction-soft);
+  box-shadow: 0 0 0 2px var(--auction-soft);
+  color: var(--auction);
+}
+
+.t-caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.15em;
+  margin-left: 1px;
+  vertical-align: -0.2em;
+  background: var(--accent);
+  animation: caret 1s steps(1) infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
 }
 
 #prompt {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 10px;
-  padding: 12px 18px;
-  border-top: 1px solid var(--border);
+  height: 44px;
+  margin: 0 12px;
+  padding: 0 8px 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
   background: var(--surface);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+#prompt:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 #prompt label {
   color: var(--accent);
-  font-weight: 700;
+  font: 700 16px var(--font-mono);
 }
 
 #prompt input {
   flex: 1;
+  min-width: 0;
   border: 0;
   outline: 0;
   background: transparent;
+  font: 13px var(--font-mono);
+}
+
+#prompt input::placeholder {
+  color: var(--faint);
+}
+
+kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 19px;
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--surface-raised);
+  color: var(--text-2);
+  font: 600 10.5px/1 var(--font-ui);
+}
+
+.command-hint {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 14px;
+  height: 36px;
+  padding: 0 26px;
+  overflow: hidden;
+  color: var(--muted);
+  font: 11.5px var(--font-mono);
+  white-space: nowrap;
+}
+
+.hint-usage,
+.hint-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hint-usage {
+  flex: none;
+  max-width: 100%;
+  white-space: pre;
+}
+
+.hint-text {
+  font-family: var(--font-ui);
+}
+
+.hint-text kbd {
+  margin: 0 1px;
+}
+
+.hint-text .sep {
+  margin: 0 6px;
+  color: var(--faint);
 }
 
 /* Smaller screens ------------------------------------------------------------------------------------------------ */
@@ -2121,6 +2529,11 @@ input.inline {
 }
 
 @media (max-width: 1279px), (max-height: 679px) {
+  .view.terminal {
+    grid-template-columns: 260px minmax(0, 1fr);
+    grid-template-rows: minmax(560px, calc(100dvh - 108px));
+  }
+
   .workspace {
     grid-template-areas:
       "chart chart"
@@ -2140,6 +2553,10 @@ input.inline {
 
 /* A shorter screen tightens the ticket so that the whole order, and its button, fit without scrolling. */
 @media (min-width: 1280px) and (max-height: 860px) {
+  .examples-note {
+    display: none;
+  }
+
   .ticket {
     gap: 7px;
     padding-block: 10px;
@@ -2246,6 +2663,30 @@ input.inline {
     margin-left: 0;
   }
 
+  .view.terminal {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(480px, calc(100dvh - 230px));
+  }
+
+  #examples {
+    grid-auto-columns: minmax(220px, 72%);
+    grid-auto-flow: column;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    scrollbar-width: none;
+  }
+
+  .example {
+    scroll-snap-align: start;
+  }
+
+  .examples-note,
+  .console-title .faint,
+  .command-hint:has(> .hint-tips) {
+    display: none;
+  }
+
   .workspace {
     grid-template-areas:
       "chart"
@@ -2264,6 +2705,14 @@ input.inline {
 }
 
 @media (max-width: 520px) {
+  .console {
+    --console-pad: 12px;
+  }
+
+  #output {
+    font-size: 10.5px;
+  }
+
   .wordmark,
   .topbar-end .label {
     display: none;

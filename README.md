@@ -41,11 +41,13 @@ The chart works like a trading terminal's. Candles of 1 second to 1 minute sit o
 
 **Trade against the agents.** The order ticket sends limit, market, stop, and stop-limit orders, with GTC, DAY, IOC, or FOK and post-only and iceberg options, into the same engine the agents trade on; a click on the order book prices an order, and the ticket estimates what would trade at once. Working orders are marked in the book and drawn on the chart as lines: drag one to a new price, or click its × to cancel. Fills land on the chart and in an orders panel that tells maker from taker and auction fills, and positions are marked to the last trade, with realized and unrealized P&L.
 
+**The command line** is the engine's own interpreter, `tradematch_cli`, compiled to WebAssembly, and it keeps one session from command to command. Its examples are the golden scenarios: a click replays one as if typed, in a fresh session that stays open to explore. The output is colored by what each line says: order sides, fills, resting orders, rejects and their reasons, trades, and books split into bids and asks. While you type, the line below the prompt shows the command's syntax, and Tab completes commands, options, and the session's symbols.
+
 <p align="center">
   <img src="docs/assets/playground.png" width="857" alt="The browser playground: the order book with depth bars, one-second candles around the simulator's hidden fair value, a cumulative depth chart, and the trade tape, during continuous trading">
 </p>
 
-The [Playground workflow](.github/workflows/playground.yml) builds the page with Emscripten on every push. Before main is deployed to GitHub Pages, every golden scenario runs through the WebAssembly build under Node and must produce, byte for byte, the transcript the native command line produces. Then the page itself runs in headless Chrome: it must start without a single console error, draw the order book, the tape, and both charts, respond to its controls, run an example on the command line, and fit a phone's screen. The page is plain HTML, CSS, and JavaScript modules, with no framework and no build step.
+The [Playground workflow](.github/workflows/playground.yml) builds the page with Emscripten on every push. Before main is deployed to GitHub Pages, every golden scenario runs through the WebAssembly build under Node and must produce, byte for byte, the transcript the native command line produces, and the command line's coloring must give back every character of every transcript. Then the page itself runs in headless Chrome: it must start without a single console error, draw the order book, the tape, and both charts, respond to its controls, trade against the agents, play an example on the command line and complete a command, and fit a phone's screen. The page is plain HTML, CSS, and JavaScript modules, with no framework and no build step.
 
 ```bash
 # with the Emscripten SDK installed and activated (https://emscripten.org)
