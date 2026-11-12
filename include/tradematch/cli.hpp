@@ -81,6 +81,11 @@ private:
     std::size_t errors_{0};
 };
 
+// Runs a script one line at a time in a fresh interpreter and returns the transcript: each command after a "> "
+// prompt, followed by what it printed. Comments and blank lines are kept as they are, and quit ends the script. The
+// command line's golden scenarios are such transcripts.
+std::string run_script(std::string_view script);
+
 }  // namespace tradematch
 
 #endif

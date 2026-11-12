@@ -772,4 +772,24 @@ void CommandInterpreter::print_events(std::span<const Trade> trades,
     }
 }
 
+std::string run_script(std::string_view script) {
+    std::ostringstream transcript;
+    CommandInterpreter interpreter(transcript);
+    while (!script.empty()) {
+        const auto end = script.find('\n');
+        const std::string_view line = script.substr(0, end);
+        script.remove_prefix(end == std::string_view::npos ? script.size() : end + 1);
+        const auto first = line.find_first_not_of(" \t");
+        if (first == std::string_view::npos || line[first] == '#') {
+            transcript << line << '\n';
+            continue;
+        }
+        transcript << "> " << line << '\n';
+        if (!interpreter.execute(line)) {
+            break;
+        }
+    }
+    return transcript.str();
+}
+
 }  // namespace tradematch

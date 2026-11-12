@@ -240,7 +240,7 @@ format-check:
 
 lint:
 	cmake -S . -B $(BUILD_DIR)/lint -DCMAKE_BUILD_TYPE=Debug > /dev/null
-	git ls-files '*.cpp' | xargs -P $(JOBS) -n 1 $(CLANG_TIDY) -p $(BUILD_DIR)/lint --quiet $(TIDY_FLAGS)
+	git ls-files '*.cpp' ':!web/*' | xargs -P $(JOBS) -n 1 $(CLANG_TIDY) -p $(BUILD_DIR)/lint --quiet $(TIDY_FLAGS)
 
 sanitize:
 	cmake -S . -B $(BUILD_DIR)/sanitize -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTRADEMATCH_WARNINGS_AS_ERRORS=ON \

@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TradeMatch Engine · live in your browser</title>
+  <meta name="description" content="A C++20 order matching engine compiled to WebAssembly: watch a simulated market trade through auctions and continuous trading, or send it orders from its command line.">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>TradeMatch <span>Engine</span></h1>
+      <p>A C++20 matching engine, compiled to WebAssembly and running in this page. Nothing here talks to a server.</p>
+    </div>
+    <nav>
+      <button class="tab active" data-view="market">Live market</button>
+      <button class="tab" data-view="terminal">Command line</button>
+      <a class="repo" href="https://github.com/AdrianTrill/TradeMatch-Engine">Source on GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <p id="loading" class="notice">Loading the engine…</p>
+
+    <section id="market" class="view" hidden>
+      <div class="toolbar">
+        <div class="symbols" id="symbols"></div>
+        <div class="session">
+          <span id="phase" class="phase">–</span>
+          <span id="clock" class="clock">–</span>
+        </div>
+        <div class="controls">
+          <button id="play" title="Pause or resume (space)">Pause</button>
+          <label class="speed">Speed
+            <input type="range" id="speed" min="1" max="60" value="4">
+            <span id="speed-label">–</span>
+          </label>
+          <button id="reseed" title="Start over with another random seed">New market</button>
+        </div>
+      </div>
+
+      <div class="grid">
+        <section class="panel ladder">
+          <h2>Order book <span class="hint">price · size · orders</span></h2>
+          <div id="ladder"></div>
+        </section>
+        <section class="panel prices">
+          <h2>Price <span id="last" class="figure">–</span> <span class="hint">one-second candles, with the hidden fair value the agents trade around</span></h2>
+          <canvas id="candles"></canvas>
+        </section>
+        <section class="panel depth">
+          <h2>Depth <span class="hint">cumulative size by price</span></h2>
+          <canvas id="depth"></canvas>
+        </section>
+        <section class="panel tape">
+          <h2>Trades <span class="hint">newest first</span></h2>
+          <ol id="tape"></ol>
+        </section>
+      </div>
+
+      <footer class="stats">
+        <span><button id="rate" class="link" title="Measure again">measuring…</button> requests a second in this browser, agents included</span>
+        <span><b id="requests">0</b> requests</span>
+        <span><b id="trades">0</b> trades</span>
+        <span><b id="auctions">0</b> auction crosses</span>
+        <span><b id="resting">0</b> orders resting</span>
+        <span>seed <b id="seed">–</b></span>
+      </footer>
+    </section>
+
+    <section id="terminal" class="view" hidden>
+      <div class="examples">
+        <span>Run an example:</span>
+        <div id="examples"></div>
+      </div>
+      <div class="console">
+        <pre id="output"></pre>
+        <form id="prompt" autocomplete="off">
+          <label for="command">&gt;</label>
+          <input id="command" spellcheck="false" placeholder="type help, or an order such as: buy ACME 100 @ 100.50">
+        </form>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

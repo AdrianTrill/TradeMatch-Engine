@@ -136,7 +136,8 @@ jobs:
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
 
       - name: Run clang-tidy
-        run: git ls-files '*.cpp' | xargs -P "$(nproc)" -n 1 clang-tidy -p build --quiet
+        # The WebAssembly binding in web/ only compiles with Emscripten; the Playground workflow builds it with -Werror.
+        run: git ls-files '*.cpp' ':!web/*' | xargs -P "$(nproc)" -n 1 clang-tidy -p build --quiet
 
   coverage:
     name: Coverage

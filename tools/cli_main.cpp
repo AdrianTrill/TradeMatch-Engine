@@ -15,7 +15,6 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -67,25 +66,6 @@ std::vector<std::string> split_lines(std::string_view text) {
     return lines;
 }
 
-// Echoes every command after a "> " prompt, so the transcript reads like the session that produced it. Comments and
-// blank lines are kept as they are.
-std::string run_script(std::string_view script) {
-    std::ostringstream transcript;
-    tradematch::CommandInterpreter interpreter(transcript);
-    for (const std::string& line : split_lines(script)) {
-        const auto first = line.find_first_not_of(" \t");
-        if (first == std::string::npos || line[first] == '#') {
-            transcript << line << '\n';
-            continue;
-        }
-        transcript << "> " << line << '\n';
-        if (!interpreter.execute(line)) {
-            break;
-        }
-    }
-    return transcript.str();
-}
-
 std::filesystem::path expected_path(const std::filesystem::path& script) {
     auto path = script;
     path.replace_extension(".expected");
@@ -119,7 +99,7 @@ bool check(const std::filesystem::path& script, const std::string& transcript) {
 int interactive() {
     const bool terminal = stdin_is_terminal();
     if (!terminal) {
-        std::cout << run_script(
+        std::cout << tradematch::run_script(
             std::string{std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>()});
         return 0;
     }
@@ -162,7 +142,7 @@ int run(int argc, char** argv) {
 
     bool passed = true;
     for (const auto& script : scripts) {
-        const std::string transcript = run_script(read_text(script));
+        const std::string transcript = tradematch::run_script(read_text(script));
         if (mode == Mode::Run) {
             std::cout << transcript;
         } else if (mode == Mode::Update) {

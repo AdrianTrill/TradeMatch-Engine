@@ -25,6 +25,13 @@ if(TRADEMATCH_WARNINGS_AS_ERRORS)
     target_compile_options(tradematch_project_options INTERFACE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX,-Werror>)
 endif()
 
+# Emscripten turns off catching C++ exceptions by default, and the engine reports bad input by throwing, so the
+# WebAssembly build uses the browsers' native exception handling, in every object it links.
+if(EMSCRIPTEN)
+    add_compile_options(-fwasm-exceptions)
+    add_link_options(-fwasm-exceptions)
+endif()
+
 if(TRADEMATCH_SANITIZERS)
     if(MSVC)
         message(FATAL_ERROR "TRADEMATCH_SANITIZERS is only supported with GCC and Clang")
@@ -79,6 +86,31 @@ target_compile_options(tradematch_sim PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-
 
 add_executable(tradematch_tui tools/tui_main.cpp)
 target_link_libraries(tradematch_tui PRIVATE tradematch_sim tradematch_project_options)
+
+# The browser playground: the simulator and the command line compiled to WebAssembly, plus the page that drives them,
+# assembled in site/ for GitHub Pages. Built with emcmake; see .github/workflows/pages.yml.
+if(EMSCRIPTEN)
+    set(TRADEMATCH_SITE_DIR ${CMAKE_CURRENT_BINARY_DIR}/site)
+    add_executable(tradematch_wasm web/playground.cpp)
+    target_link_libraries(tradematch_wasm PRIVATE tradematch_sim tradematch_project_options)
+    target_link_options(tradematch_wasm PRIVATE
+        -lembind
+        -sMODULARIZE=1
+        -sEXPORT_ES6=1
+        -sEXPORT_NAME=createTradeMatch
+        -sALLOW_MEMORY_GROWTH=1
+        -sENVIRONMENT=web,node)
+    set_target_properties(tradematch_wasm PROPERTIES OUTPUT_NAME tradematch RUNTIME_OUTPUT_DIRECTORY ${TRADEMATCH_SITE_DIR})
+    # The page, and the scenario scripts its command line offers as examples, copied fresh on every build.
+    file(GLOB TRADEMATCH_WEB_ASSETS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/web/*.html ${PROJECT_SOURCE_DIR}/web/*.css
+         ${PROJECT_SOURCE_DIR}/web/app.js)
+    file(GLOB TRADEMATCH_WEB_SCENARIOS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/tests/scenarios/*.tm)
+    add_custom_target(tradematch_site
+        COMMAND ${CMAKE_COMMAND} -E copy ${TRADEMATCH_WEB_ASSETS} ${TRADEMATCH_SITE_DIR}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${TRADEMATCH_SITE_DIR}/scenarios
+        COMMAND ${CMAKE_COMMAND} -E copy ${TRADEMATCH_WEB_SCENARIOS} ${TRADEMATCH_SITE_DIR}/scenarios
+        DEPENDS tradematch_wasm)
+endif()
 
 add_executable(tradematch_itch tools/itch_main.cpp)
 target_link_libraries(tradematch_itch PRIVATE tradematch_sim tradematch_project_options)

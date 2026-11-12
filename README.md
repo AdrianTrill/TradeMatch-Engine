@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/ci.yml)
 [![Fuzz](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml/badge.svg?branch=main)](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/fuzz.yml)
+[![Playground](https://github.com/AdrianTrill/TradeMatch-Engine/actions/workflows/playground.yml/badge.svg?branch=main)](https://adriantrill.github.io/TradeMatch-Engine/)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -14,6 +15,24 @@ Prices are represented as integer ticks rather than floating-point values. In th
   <img src="docs/assets/tui.gif" width="857" alt="The TradeMatch terminal UI: a live order book with depth bars, a trade tape, and one-second candles, as an agent-based market moves from the opening call auction into continuous trading">
 </p>
 <p align="center"><em>The <a href="#live-market-simulator">live market simulator</a>: trading agents on the engine, from the opening call auction into continuous trading (<code>make tui</code>).</em></p>
+
+## Try It in Your Browser
+
+The engine also compiles to WebAssembly. **[Open the playground](https://adriantrill.github.io/TradeMatch-Engine/)** to watch the market simulator trade live, with its order book, one-second candles, depth, and trades drawn as it goes, or switch to the command line and send orders yourself, with the golden scenarios a click away. It all runs in the page, with no server: there the simulator, agents included, handles about 3 million requests a second. `?seed=N` in the address picks the market, so a market can be shared, and `?skip=S` fast-forwards it by S simulated seconds.
+
+<p align="center">
+  <img src="docs/assets/playground.png" width="857" alt="The browser playground: the order book with depth bars, one-second candles around the simulator's hidden fair value, a cumulative depth chart, and the trade tape, during continuous trading">
+</p>
+
+The [Playground workflow](.github/workflows/playground.yml) builds the page with Emscripten on every push. Before main is deployed to GitHub Pages, every golden scenario runs through the WebAssembly build under Node and must produce, byte for byte, the transcript the native command line produces.
+
+```bash
+# with the Emscripten SDK installed and activated (https://emscripten.org)
+emcmake cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build-wasm --target tradematch_site
+node web/check.mjs build-wasm/site tests/scenarios        # the golden scenarios, in WebAssembly
+python3 -m http.server --directory build-wasm/site 8000   # then open http://localhost:8000
+```
 
 ## Why It Is Interesting
 
@@ -52,6 +71,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - An interactive command line, and scripted scenarios with golden transcripts for each matching rule
 - A FIX 4.2 order-entry gateway over TCP, with a client for interactive trading and latency measurement
 - An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
+- A browser playground: the simulator and the command line compiled to WebAssembly, deployed to GitHub Pages
 - Deterministic benchmark/demo scenarios
 
 ## API Overview
@@ -207,6 +227,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── CMakeLists.txt
 ├── Makefile
 ├── docs/assets/
+│   ├── playground.png
 │   └── tui.gif
 ├── include/tradematch/
 │   ├── book_listener.hpp
@@ -287,14 +308,20 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── cmake/
 │   ├── itch_roundtrip.cmake
 │   └── replay_roundtrip.cmake
-└── tools/
-    ├── cli_main.cpp
-    ├── demo_main.cpp
-    ├── fix_client_main.cpp
-    ├── fix_gateway_main.cpp
-    ├── itch_main.cpp
-    ├── replay_main.cpp
-    └── tui_main.cpp
+├── tools/
+│   ├── cli_main.cpp
+│   ├── demo_main.cpp
+│   ├── fix_client_main.cpp
+│   ├── fix_gateway_main.cpp
+│   ├── itch_main.cpp
+│   ├── replay_main.cpp
+│   └── tui_main.cpp
+└── web/
+    ├── app.js
+    ├── check.mjs
+    ├── index.html
+    ├── playground.cpp
+    └── style.css
 ```
 
 ## Build
@@ -915,7 +942,7 @@ Journaling adds about 14 ns per request, most of it varint encoding; the CRC-32C
 
 ## Continuous Integration
 
-Every push runs two workflows:
+Every push runs three workflows:
 
 | Workflow | Job | What it checks |
 | --- | --- | --- |
@@ -925,9 +952,10 @@ Every push runs two workflows:
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
 | CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
 | CI | Smoke tests | Every scenario's transcript matches its golden file. `tradematch_benchmark` and `tradematch_pipeline_benchmark` run short workloads, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform. The pipeline benchmark also checks its book against a single-threaded replay |
-| CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
+| CI | Coverage | Engine line coverage must stay at or above 95% (currently 97% of lines and 86% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
 | Fuzz | libFuzzer | Four targets (order flow, journal and snapshot decoding, the FIX gateway, and ITCH) fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
+| Playground | WebAssembly build | The engine, simulator, and command line built with Emscripten 7.0.0 and warnings as errors; every golden scenario checked under Node against its native transcript; main deployed to GitHub Pages |
 
 ## Why This Project Matters
 
@@ -939,4 +967,4 @@ It is also a strong stepping stone for deeper systems work, such as putting the 
 
 - MoldUDP64, the transport that carries ITCH live, alongside its file format
 - FIX resend requests and sequence numbers that persist across reconnects
-- WebAssembly and Python front ends
+- Python bindings
