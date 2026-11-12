@@ -1,0 +1,12 @@
+{
+  "name": "tradematch-playground-checks",
+  "private": true,
+  "description": "Checks for the browser playground: the page itself, driven in headless Chrome.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "devDependencies": {
+    "puppeteer-core": "25.17.0"
+  }
+}

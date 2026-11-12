@@ -107,12 +107,15 @@ if(EMSCRIPTEN)
         -sALLOW_MEMORY_GROWTH=1
         -sENVIRONMENT=web,node)
     set_target_properties(tradematch_wasm PROPERTIES OUTPUT_NAME tradematch RUNTIME_OUTPUT_DIRECTORY ${TRADEMATCH_SITE_DIR})
-    # The page, and the scenario scripts its command line offers as examples, copied fresh on every build.
+    # The page, its scripts, and the scenario scripts its command line offers as examples, copied fresh on every build.
     file(GLOB TRADEMATCH_WEB_ASSETS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/web/*.html ${PROJECT_SOURCE_DIR}/web/*.css
-         ${PROJECT_SOURCE_DIR}/web/app.js)
+         ${PROJECT_SOURCE_DIR}/web/*.svg ${PROJECT_SOURCE_DIR}/web/*.png)
+    file(GLOB TRADEMATCH_WEB_SCRIPTS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/web/js/*.js)
     file(GLOB TRADEMATCH_WEB_SCENARIOS CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/tests/scenarios/*.tm)
     add_custom_target(tradematch_site
         COMMAND ${CMAKE_COMMAND} -E copy ${TRADEMATCH_WEB_ASSETS} ${TRADEMATCH_SITE_DIR}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${TRADEMATCH_SITE_DIR}/js
+        COMMAND ${CMAKE_COMMAND} -E copy ${TRADEMATCH_WEB_SCRIPTS} ${TRADEMATCH_SITE_DIR}/js
         COMMAND ${CMAKE_COMMAND} -E make_directory ${TRADEMATCH_SITE_DIR}/scenarios
         COMMAND ${CMAKE_COMMAND} -E copy ${TRADEMATCH_WEB_SCENARIOS} ${TRADEMATCH_SITE_DIR}/scenarios
         DEPENDS tradematch_wasm)

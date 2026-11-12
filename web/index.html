@@ -1,88 +1,136 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>TradeMatch Engine · live in your browser</title>
   <meta name="description" content="A C++20 order matching engine compiled to WebAssembly: watch a simulated market trade through auctions and continuous trading, or send it orders from its command line.">
+  <meta name="theme-color" content="#06080d">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
-  <script type="module" src="app.js"></script>
+  <script type="module" src="js/app.js"></script>
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <h1>TradeMatch <span>Engine</span></h1>
-      <p>A C++20 matching engine, compiled to WebAssembly and running in this page. Nothing here talks to a server.</p>
+  <svg class="sprite" aria-hidden="true">
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.6v12.8a1 1 0 0 0 1.5.86l10.6-6.4a1 1 0 0 0 0-1.72L9.5 4.74A1 1 0 0 0 8 5.6Z" fill="currentColor"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4.2" height="14" rx="1.2" fill="currentColor"/><rect x="13.8" y="5" width="4.2" height="14" rx="1.2" fill="currentColor"/></symbol>
+    <symbol id="i-dice" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="9" cy="9" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="15" cy="15" r="1.5" fill="currentColor"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="m8.5 7.5-4.5 4.5 4.5 4.5M15.5 7.5l4.5 4.5-4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M7 4v3M7 15v5M17 4v5M17 17v3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><rect x="5" y="7" width="4" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="15" y="9" width="4" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m7.5 10 2.5 2.5-2.5 2.5M12.5 15H16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M17 14v4a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1h4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  </svg>
+
+  <div class="app">
+    <header class="topbar">
+      <a class="brand" href="./" aria-label="TradeMatch Engine">
+        <img class="logo" src="favicon.svg" alt="" width="28" height="28">
+        <span class="wordmark">TradeMatch <span>Engine</span></span>
+      </a>
+      <nav class="views" aria-label="Views">
+        <button class="view-tab active" data-view="market"><svg class="icon"><use href="#i-chart"/></svg>Market</button>
+        <button class="view-tab" data-view="terminal"><svg class="icon"><use href="#i-terminal"/></svg>Command line</button>
+      </nav>
+      <div class="topbar-end">
+        <span class="live-badge" title="The engine runs in this page, compiled from C++20 to WebAssembly. Nothing talks to a server.">
+          <span class="pulse"></span>Live in your browser<span class="faint">C++20 → WebAssembly</span>
+        </span>
+        <a class="button ghost" href="https://github.com/AdrianTrill/TradeMatch-Engine" target="_blank" rel="noopener">
+          <svg class="icon"><use href="#i-code"/></svg><span class="label">Source</span>
+        </a>
+      </div>
+    </header>
+
+    <div id="loading" class="loading" role="status">
+      <img class="logo" src="favicon.svg" alt="" width="56" height="56">
+      <p>Starting the matching engine…</p>
     </div>
-    <nav>
-      <button class="tab active" data-view="market">Live market</button>
-      <button class="tab" data-view="terminal">Command line</button>
-      <a class="repo" href="https://github.com/AdrianTrill/TradeMatch-Engine">Source on GitHub</a>
-    </nav>
-  </header>
 
-  <main>
-    <p id="loading" class="notice">Loading the engine…</p>
-
-    <section id="market" class="view" hidden>
-      <div class="toolbar">
-        <div class="symbols" id="symbols"></div>
+    <main id="market" class="view market" hidden>
+      <section class="marketbar" aria-label="Market">
+        <div class="tickers" id="tickers" role="tablist" aria-label="Symbols"></div>
+        <div class="quote">
+          <span class="quote-price" id="last">–</span>
+          <span class="quote-change" id="change"></span>
+        </div>
         <div class="session">
-          <span id="phase" class="phase">–</span>
-          <span id="clock" class="clock">–</span>
+          <span class="phase" id="phase">–</span>
+          <span class="clock" id="clock">–</span>
         </div>
         <div class="controls">
-          <button id="play" title="Pause or resume (space)">Pause</button>
-          <label class="speed">Speed
-            <input type="range" id="speed" min="1" max="60" value="4">
-            <span id="speed-label">–</span>
-          </label>
-          <button id="reseed" title="Start over with another random seed">New market</button>
+          <button class="icon-button" id="play" title="Pause (space)" aria-label="Pause"><svg class="icon"><use href="#i-pause"/></svg></button>
+          <div class="segmented speed" id="speed" role="radiogroup" aria-label="Speed"></div>
+          <button class="icon-button" id="reseed" title="A new market from a random seed" aria-label="New market"><svg class="icon"><use href="#i-dice"/></svg></button>
+          <button class="icon-button" id="share" title="Copy a link to this market at this moment" aria-label="Copy link"><svg class="icon"><use href="#i-link"/></svg></button>
         </div>
+      </section>
+
+      <div class="workspace">
+        <section class="panel chart-panel">
+          <header class="panel-head">
+            <h2>Price</h2>
+            <span class="panel-note">One-second candles, and the hidden fair value the agents trade around</span>
+          </header>
+          <div class="panel-body canvas-wrap"><canvas id="candles"></canvas></div>
+        </section>
+
+        <section class="panel book-panel">
+          <header class="panel-head">
+            <h2>Order book</h2>
+            <span class="panel-note" id="book-note"></span>
+          </header>
+          <div class="panel-body book" id="book"></div>
+        </section>
+
+        <section class="panel depth-panel">
+          <header class="panel-head">
+            <h2>Depth</h2>
+            <span class="panel-note">Cumulative size by price</span>
+          </header>
+          <div class="panel-body canvas-wrap"><canvas id="depth"></canvas></div>
+        </section>
+
+        <section class="panel tape-panel">
+          <header class="panel-head">
+            <h2>Trades</h2>
+            <span class="panel-note">Newest first</span>
+          </header>
+          <div class="panel-body tape">
+            <div class="columns"><span>Time</span><span>Price</span><span>Size</span></div>
+            <ol id="tape"></ol>
+          </div>
+        </section>
       </div>
+    </main>
 
-      <div class="grid">
-        <section class="panel ladder">
-          <h2>Order book <span class="hint">price · size · orders</span></h2>
-          <div id="ladder"></div>
-        </section>
-        <section class="panel prices">
-          <h2>Price <span id="last" class="figure">–</span> <span class="hint">one-second candles, with the hidden fair value the agents trade around</span></h2>
-          <canvas id="candles"></canvas>
-        </section>
-        <section class="panel depth">
-          <h2>Depth <span class="hint">cumulative size by price</span></h2>
-          <canvas id="depth"></canvas>
-        </section>
-        <section class="panel tape">
-          <h2>Trades <span class="hint">newest first</span></h2>
-          <ol id="tape"></ol>
-        </section>
-      </div>
-
-      <footer class="stats">
-        <span><button id="rate" class="link" title="Measure again">measuring…</button> requests a second in this browser, agents included</span>
-        <span><b id="requests">0</b> requests</span>
-        <span><b id="trades">0</b> trades</span>
-        <span><b id="auctions">0</b> auction crosses</span>
-        <span><b id="resting">0</b> orders resting</span>
-        <span>seed <b id="seed">–</b></span>
-      </footer>
-    </section>
-
-    <section id="terminal" class="view" hidden>
+    <main id="terminal" class="view terminal" hidden>
       <div class="examples">
-        <span>Run an example:</span>
+        <span class="examples-label">Run an example</span>
         <div id="examples"></div>
       </div>
       <div class="console">
         <pre id="output"></pre>
         <form id="prompt" autocomplete="off">
-          <label for="command">&gt;</label>
+          <label for="command">›</label>
           <input id="command" spellcheck="false" placeholder="type help, or an order such as: buy ACME 100 @ 100.50">
         </form>
       </div>
-    </section>
-  </main>
+    </main>
+
+    <footer class="statusbar">
+      <span class="status-item"><span class="dot" id="engine-dot"></span><span id="engine-state">Engine starting</span></span>
+      <span class="status-item">seed <b id="seed">–</b></span>
+      <span class="status-item"><b id="requests">0</b> requests</span>
+      <span class="status-item"><b id="trades">0</b> trades</span>
+      <span class="status-item"><b id="auctions">0</b> auction crosses</span>
+      <span class="status-item"><b id="resting">0</b> resting orders</span>
+      <span class="status-item end">
+        <svg class="icon"><use href="#i-bolt"/></svg>
+        <button id="rate" class="link" title="Measure again">measuring…</button>&nbsp;requests/s in this browser, agents included
+      </span>
+    </footer>
+  </div>
 </body>
 </html>

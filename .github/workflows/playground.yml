@@ -46,6 +46,21 @@ jobs:
       - name: Check the WebAssembly build
         run: node web/check.mjs build-wasm/site tests/scenarios
 
+      # The page itself, in the runner's Chrome: it must start without errors, draw the market, respond to its
+      # controls, and fit a phone's screen.
+      - name: Check the page in headless Chrome
+        run: |
+          npm ci --prefix web
+          node web/ui-check.mjs build-wasm/site --screenshots page-screenshots
+
+      - name: Upload the page's screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: page-screenshots
+          path: page-screenshots/
+          if-no-files-found: ignore
+
       - name: Upload the site
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5

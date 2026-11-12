@@ -41,13 +41,14 @@ The engine also compiles to WebAssembly. **[Open the playground](https://adriant
   <img src="docs/assets/playground.png" width="857" alt="The browser playground: the order book with depth bars, one-second candles around the simulator's hidden fair value, a cumulative depth chart, and the trade tape, during continuous trading">
 </p>
 
-The [Playground workflow](.github/workflows/playground.yml) builds the page with Emscripten on every push. Before main is deployed to GitHub Pages, every golden scenario runs through the WebAssembly build under Node and must produce, byte for byte, the transcript the native command line produces.
+The [Playground workflow](.github/workflows/playground.yml) builds the page with Emscripten on every push. Before main is deployed to GitHub Pages, every golden scenario runs through the WebAssembly build under Node and must produce, byte for byte, the transcript the native command line produces. Then the page itself runs in headless Chrome: it must start without a single console error, draw the order book, the tape, and both charts, respond to its controls, run an example on the command line, and fit a phone's screen. The page is plain HTML, CSS, and JavaScript modules, with no framework and no build step.
 
 ```bash
 # with the Emscripten SDK installed and activated (https://emscripten.org)
 emcmake cmake -S . -B build-wasm -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 cmake --build build-wasm --target tradematch_site
 node web/check.mjs build-wasm/site tests/scenarios        # the golden scenarios, in WebAssembly
+npm ci --prefix web && node web/ui-check.mjs build-wasm/site   # the page, in headless Chrome
 python3 -m http.server --directory build-wasm/site 8000   # then open http://localhost:8000
 ```
 
@@ -370,11 +371,15 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 ├── notebooks/
 │   └── market_microstructure.ipynb
 └── web/
-    ├── app.js
     ├── check.mjs
+    ├── favicon.svg
     ├── index.html
+    ├── js/
+    │   └── *.js
+    ├── package.json
     ├── playground.cpp
-    └── style.css
+    ├── style.css
+    └── ui-check.mjs
 ```
 
 ## Build
@@ -1044,7 +1049,7 @@ Every push runs three workflows:
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 97% of lines and 86% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
 | Fuzz | libFuzzer | Four targets (order flow, journal and snapshot decoding, the FIX gateway, and ITCH) fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
-| Playground | WebAssembly build | The engine, simulator, and command line built with Emscripten 7.0.0 and warnings as errors; every golden scenario checked under Node against its native transcript; main deployed to GitHub Pages |
+| Playground | WebAssembly build | The engine, simulator, and command line built with Emscripten 7.0.0 and warnings as errors; every golden scenario checked under Node against its native transcript; the page driven in headless Chrome on desktop and phone screens; main deployed to GitHub Pages |
 
 ## Why This Project Matters
 
