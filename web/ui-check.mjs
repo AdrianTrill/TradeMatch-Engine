@@ -253,6 +253,44 @@ await check('the command line plays an example in color, and completes commands'
   await page.click('.view-tab[data-view="market"]');
 });
 
+await check('the theme turns light, is remembered, and turns dark again', async () => {
+  const theme = () => page.evaluate(() => document.documentElement.dataset.theme);
+  // The depth chart's average shade, read from a copy so the page's own canvas is read only once in the checks.
+  const shade = () => page.evaluate(() => {
+    const canvas = document.getElementById('depth');
+    const copy = document.createElement('canvas');
+    copy.width = canvas.width;
+    copy.height = canvas.height;
+    const context = copy.getContext('2d', { willReadFrequently: true });
+    context.drawImage(canvas, 0, 0);
+    const pixels = context.getImageData(0, 0, copy.width, copy.height).data;
+    let sum = 0;
+    let count = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (pixels[index + 3] > 128) {
+        sum += 0.2126 * pixels[index] + 0.7152 * pixels[index + 1] + 0.0722 * pixels[index + 2];
+        count += 1;
+      }
+    }
+    return Math.round(sum / count);
+  });
+  const dark = await shade();
+  await page.click('#theme');
+  await sleep(600);
+  expect((await theme()) === 'light', 'the page should turn light');
+  const light = await shade();
+  expect(light < dark * 0.85, `the depth chart should redraw darker on white, but went from ${dark} to ${light}`);
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForSelector('#market:not([hidden])', { timeout: 20_000 });
+  expect((await theme()) === 'light', 'the light theme should be remembered');
+  await sleep(1_000);
+  await screenshot('market-light');
+  await page.click('#theme');
+  await sleep(600);
+  expect((await theme()) === 'dark', 'the page should turn dark again');
+  return `the depth chart's shade went from ${dark} to ${light}`;
+});
+
 await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
 await page.reload({ waitUntil: 'load' });
 await check('a phone screen fits the page', async () => {

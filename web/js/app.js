@@ -11,6 +11,7 @@ import { CandleHistory } from './history.js';
 import { readPalette } from './palette.js';
 import { TapeView } from './tape.js';
 import { startTerminal } from './terminal.js';
+import { startTheme } from './theme.js';
 import { toast } from './toast.js';
 import { Account, Ticket } from './trading.js';
 
@@ -252,12 +253,17 @@ function frame(now) {
         market.instance.step(steps);
       }
     }
-    const candles = history(market.symbol);
-    const view = JSON.parse(market.instance.snapshot(market.symbol, book.depth, candles.since));
-    candles.merge(view.candles);
-    render(view, candles);
+    redraw();
   }
   requestAnimationFrame(frame);
+}
+
+// Draws the market as it stands, without stepping it.
+function redraw() {
+  const candles = history(market.symbol);
+  const view = JSON.parse(market.instance.snapshot(market.symbol, book.depth, candles.since));
+  candles.merge(view.candles);
+  render(view, candles);
 }
 
 function setRunning(running) {
@@ -356,6 +362,11 @@ $('#share').addEventListener('click', async () => {
   }
 });
 $('#rate').addEventListener('click', measureSpeed);
+startTheme(() => {
+  if (!$('#market').hidden) {
+    redraw();
+  }
+});
 document.addEventListener('keydown', (event) => {
   if (event.code === 'Space' && event.target === document.body && !$('#market').hidden) {
     event.preventDefault();

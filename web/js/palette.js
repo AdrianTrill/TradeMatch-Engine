@@ -3,7 +3,7 @@
 const NAMES = [
   'text', 'text-2', 'muted', 'faint', 'grid', 'hover', 'border', 'border-strong', 'surface', 'surface-raised', 'surface-sunken',
   'buy', 'buy-soft', 'buy-strong', 'sell', 'sell-soft', 'sell-strong', 'auction', 'auction-soft', 'fair', 'vwap',
-  'accent', 'accent-soft', 'crosshair', 'font-ui', 'font-mono',
+  'accent', 'accent-soft', 'crosshair', 'on-buy', 'on-sell', 'on-accent', 'font-ui', 'font-mono',
 ];
 
 // Keyed in camel case: --text-2 is palette.text2, --buy-soft is palette.buySoft.

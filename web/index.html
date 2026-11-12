@@ -6,6 +6,16 @@
   <title>TradeMatch Engine · live in your browser</title>
   <meta name="description" content="A C++20 order matching engine compiled to WebAssembly: watch a simulated market trade through auctions and continuous trading, or send it orders from its command line.">
   <meta name="theme-color" content="#06080d">
+  <script>
+    try {
+      if (localStorage.getItem('tradematch-theme') === 'light') {
+        document.documentElement.dataset.theme = 'light';
+        document.querySelector('meta[name="theme-color"]').content = '#eef1f6';
+      }
+    } catch {
+      // Without storage, the page keeps its dark theme.
+    }
+  </script>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
   <script type="module" src="js/app.js"></script>
@@ -25,6 +35,8 @@
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.8v2.1M12 19.1v2.1M2.8 12h2.1M19.1 12h2.1M5.5 5.5 7 7M17 17l1.5 1.5M5.5 18.5 7 17M17 7l1.5-1.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.6 14.6A8 8 0 0 1 9.4 4.4a8 8 0 1 0 10.2 10.2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
     <symbol id="i-check" viewBox="0 0 24 24"><path d="m5.5 12.5 4 4 9-9.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M15.5 8.5V7a2.5 2.5 0 0 0-2.5-2.5H7A2.5 2.5 0 0 0 4.5 7v6A2.5 2.5 0 0 0 7 15.5h1.5" fill="none" stroke="currentColor" stroke-width="1.8"/></symbol>
     <symbol id="i-clear" viewBox="0 0 24 24"><path d="M5 7h14M10 4.5h4M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M10.5 10.5v6M13.5 10.5v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
@@ -45,6 +57,7 @@
         <span class="live-badge" title="The engine runs in this page, compiled from C++20 to WebAssembly. Nothing talks to a server.">
           <span class="pulse"></span>Live in your browser<span class="faint">C++20 → WebAssembly</span>
         </span>
+        <button class="icon-button" id="theme" type="button" title="Light theme" aria-label="Switch to the light theme"><svg class="icon"><use href="#i-sun"/></svg></button>
         <a class="button ghost" href="https://github.com/AdrianTrill/TradeMatch-Engine" target="_blank" rel="noopener">
           <svg class="icon"><use href="#i-code"/></svg><span class="label">Source</span>
         </a>

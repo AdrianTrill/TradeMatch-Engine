@@ -290,7 +290,8 @@ export class PriceChart {
       context.stroke();
       context.setLineDash([]);
       context.globalAlpha = 1;
-      tags.push({ y: y(last), text: price(last), background: lastColor, color: '#fff' });
+      tags.push({ y: y(last), text: price(last), background: lastColor,
+        color: lastBar[4] >= lastBar[1] ? palette.onBuy : palette.onSell });
     }
     if (this.show.fair) {
       tags.push({ y: y(view.fair), text: price(view.fair), background: palette.fair, color: palette.surface });
@@ -393,7 +394,7 @@ export class PriceChart {
       context.stroke();
       context.setLineDash([]);
       tags.push({ y: y(overlay.position.average), text: (overlay.position.average / 100).toFixed(2),
-        background: palette.accent, color: '#fff' });
+        background: palette.accent, color: palette.onAccent });
     }
 
     // Orders: a line at the price that matters (the limit, or for stops the trigger), and a label at the left.
@@ -418,7 +419,7 @@ export class PriceChart {
       context.stroke();
       context.setLineDash([]);
       labels.push({ id, y: level, color, side, type, remaining, price: orderPrice, shown, dragging });
-      tags.push({ y: level, text: price(shown), background: color, color: side === 'BUY' ? '#03130c' : '#fff' });
+      tags.push({ y: level, text: price(shown), background: color, color: side === 'BUY' ? palette.onBuy : palette.onSell });
     }
     labels.sort((a, b) => a.y - b.y);
     let previous = -Infinity;
