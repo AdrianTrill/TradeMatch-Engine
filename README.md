@@ -46,6 +46,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Zero heap allocations on the request path once capacity is reserved
 - A write-ahead journal of every command: CRC-32C-checked, about 20 bytes per order, and safe against torn writes
 - Atomic snapshots, recovery from a snapshot plus the journal tail, and a 64-bit hash of the complete book state
+- A multi-threaded gateway, matcher, and publisher pipeline over lock-free rings, with journal writes on an I/O thread
 - An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
 - Deterministic benchmark/demo scenarios
 
@@ -208,14 +209,17 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   │   ├── codec.hpp
 │   │   ├── config.hpp
 │   │   ├── file_io.hpp
-│   │   └── order_index.hpp
+│   │   ├── order_index.hpp
+│   │   └── spin.hpp
 │   ├── journal.hpp
 │   ├── latency_histogram.hpp
 │   ├── market_data.hpp
 │   ├── matching_engine.hpp
 │   ├── order_book.hpp
+│   ├── pipeline.hpp
 │   ├── simulator.hpp
 │   ├── snapshot.hpp
+│   ├── spsc_ring.hpp
 │   └── types.hpp
 ├── src/
 │   ├── codec.cpp
@@ -225,6 +229,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── market_data.cpp
 │   ├── matching_engine.cpp
 │   ├── order_book.cpp
+│   ├── pipeline.cpp
 │   ├── simulator.cpp
 │   └── snapshot.cpp
 ├── bench/
@@ -233,6 +238,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   │   └── map_order_book.hpp
 │   ├── benchmark_main.cpp
 │   ├── journaled_book.hpp
+│   ├── pipeline_main.cpp
 │   ├── system_info.hpp
 │   ├── workload.cpp
 │   └── workload.hpp
@@ -244,6 +250,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── market_data_tests.cpp
 │   ├── order_book_tests.cpp
 │   ├── order_index_tests.cpp
+│   ├── pipeline_tests.cpp
 │   ├── simulator_tests.cpp
 │   └── support/
 │       ├── differential.hpp
@@ -298,6 +305,7 @@ make format        # apply clang-format
 make format-check  # verify formatting without changing files
 make lint          # clang-tidy with the repository's .clang-tidy rules
 make sanitize      # build and test under AddressSanitizer + UndefinedBehaviorSanitizer
+make tsan          # build and test under ThreadSanitizer
 make coverage      # line/branch coverage of the engine, with an HTML report
 ```
 
@@ -402,6 +410,7 @@ tradematch::recover(recovered, "orders.tmj", "orders.snapshot");
 | Mode | Records reach the operating system | Survives | Cost per request (Apple M4) |
 | --- | --- | --- | --- |
 | `Buffered` (default) | in 64 KiB batches | a clean shutdown; a crash loses the latest batch | about 14 ns |
+| `Background` | in 64 KiB batches, written by an I/O thread | a clean shutdown; a crash loses the batches in flight (up to four) | about 12 ns, and no disk writes on the caller's thread |
 | `Flush` | one `write` per record | a process crash | about 1.1 µs |
 | `Sync` | one write per record, forced to stable storage (`F_FULLFSYNC` on macOS, `fsync` on Linux, `_commit` on Windows) | power loss | a drive cache flush, typically milliseconds |
 
@@ -435,6 +444,58 @@ verified    the replayed state matches the expected hash
 ```
 
 `make replay-demo` runs exactly this, and CTest runs it on every CI platform. `--snapshot FILE` starts from a snapshot, `--save-snapshot FILE` writes one, and `--expect-hash` fails unless the replayed state matches.
+
+## Multi-Threaded Pipeline
+
+`Pipeline` puts the engine behind the order path of a real exchange: a gateway hands requests to a matcher thread, which publishes reports and market data to a publisher thread.
+
+```text
+                   requests                          events
+ gateway thread ─────────────► matcher thread ─────────────────► publisher thread ──► your consumer
+ (send)           SPSC ring    (owns the engine)    SPSC ring    (calls the consumer)
+                                     │
+                                     │ journal records, in 64 KiB batches
+                                     ▼
+                                 I/O thread ──► disk
+```
+
+```cpp
+tradematch::PipelineConfig config;
+config.symbols = {"ACME"};
+config.journal = "orders.tmj";  // optional: journal every request, with an I/O thread doing the writes
+
+tradematch::Pipeline pipeline(config, [](const tradematch::PipelineEvent& event) {
+    // Runs on the publisher thread: one Report per request, after its Trade and LevelUpdate events.
+});
+pipeline.send({tradematch::CommandType::Submit, pipeline.symbol("ACME"),
+               {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10050}, /*request_id=*/1, now_ns});
+pipeline.finish();  // drains both stages, joins the threads, and rethrows any failure from them
+```
+
+**Determinism.** Only the matcher touches the engine, so matching stays single-threaded, and the pipeline produces exactly the results of applying the same requests in order on one thread. The tests and the benchmark both check this.
+
+**Lock-free rings.** The stages are connected by a bounded single-producer, single-consumer ring ([include/tradematch/spsc_ring.hpp](include/tradematch/spsc_ring.hpp)). Each side owns one index and publishes it with a release store, and the other side reads it with an acquire load; that is all the synchronization one producer and one consumer need. The producer's and consumer's fields sit on separate 128-byte cache lines, and each side caches the other's index, reloading it only when the ring looks full or empty. In steady state the two cores therefore share a cache line once per batch of messages rather than once per message. The matcher and the publisher also take up to 64 messages per pop, which spreads the cost of the atomics further.
+
+**Waiting.** By default, an idle thread spins for about a microsecond and then yields its core, which suits a shared machine. With `WaitStrategy::Spin` it never yields, for the lowest and steadiest latency when every thread has a core to itself. On Apple silicon the threads also request the `USER_INTERACTIVE` quality of service, which keeps them on the performance cores; on Linux, pinning them to isolated cores is the operator's job. A full queue applies backpressure: the producer waits instead of dropping anything.
+
+**Journaling off the matching thread.** With a journal, the matcher appends each request to an in-memory batch before applying it, and `Durability::Background` hands every full 64 KiB batch to an I/O thread. Four batch buffers circulate between the two threads through a pair of SPSC rings, so the matcher waits only if the disk falls four batches behind. After each batch, the I/O thread spins for 200 µs before parking, and the matcher sends a wake-up only when the I/O thread has actually parked. Both sides use sequentially consistent operations for that handshake, so no wake-up can be lost, and under load the matcher never makes a system call. Compared with writing each batch itself, this cuts the journaled engine's p99.99 from about 7 us to about 2 us (see [Journaling](#journaling)).
+
+**Failures.** An exception on the matcher or publisher thread, such as a `JournalError` from a full disk or an exception from the consumer, is caught and rethrown by `finish()`. Meanwhile the failed stage keeps draining its queue, so the gateway never blocks.
+
+**Benchmark.** `tradematch_pipeline_benchmark` sends the benchmark's order stream through the pipeline and times each request from the moment it was due to be sent until the publisher receives its report. Paced runs measure from the intended send time, so a stalled gateway shows up as latency instead of hiding it (no coordinated omission). Every run ends by checking the pipeline's book against a single-threaded replay of the same requests. On the Apple M4 (median of 5 runs, market data on, spinning threads):
+
+| load | p50 | p90 | p99 | p99.9 | p99.99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1M requests/s | 209 ns | 375 ns | 7.4 us | 29.7 us | 167 us |
+| 5M requests/s | 225 ns | 425 ns | 52.2 us | 78.3 us | 109 us |
+
+Unpaced, the pipeline sustains about 10 million requests per second end to end, and each request produces about 2.2 events: its report, trades, and level updates. The tail mostly reflects macOS, which can't pin threads to cores; isolated cores on Linux would tighten it.
+
+```bash
+make pipeline-benchmark                                          # 1M requests/s
+./build/tradematch_pipeline_benchmark --rate 5000000 --journal pipeline.tmj
+./build/tradematch_pipeline_benchmark                            # unpaced: maximum throughput
+```
 
 ## Example Workflow
 
@@ -550,6 +611,17 @@ The journal suite ([tests/journal_tests.cpp](tests/journal_tests.cpp)) covers pe
 
 CTest also records a session with `tradematch_tui --journal`, replays it with `tradematch_replay`, and requires the same state hash.
 
+The pipeline suite ([tests/pipeline_tests.cpp](tests/pipeline_tests.cpp)) checks the threads:
+
+- the ring's FIFO order, full and empty states, batch pops, and wrap-around, and a million items through a 16-slot ring between two threads, arriving exactly once and in order
+- 30,000 adversarial requests (auctions, stops, icebergs, self-trade prevention) through the pipeline producing exactly the reports, trades, and final books of the same requests applied on one thread
+- a depth replica built on the publisher thread from published level updates matching the engine's book
+- a journaled pipeline replaying to the same state hash
+- queues of two slots and a consumer that stalls: everything still arrives, in order, while both queues fill up
+- rejection of requests the matcher can't apply, and exceptions thrown by the consumer resurfacing from `finish()`
+
+CI runs every suite under ThreadSanitizer as well. Weakening the ring's release store to a relaxed one makes it report a data race at once.
+
 ## Differential Testing and Fuzzing
 
 Hand-written scenarios only cover the cases someone thought of. To catch the rest, the engine is checked against a second, deliberately naive implementation ([tests/support/reference_book.hpp](tests/support/reference_book.hpp)). The reference keeps every resting order in one flat vector and finds the best match with a linear scan, so it is slow but easy to verify by reading.
@@ -644,10 +716,11 @@ Notes for reading the numbers:
 | journal size | | 19.3 bytes per request |
 | heap allocations per operation | 0 | 0 |
 
-Journaling adds about 14 ns per request, most of it varint encoding; the CRC-32C takes about 1.5 ns on the CPU's CRC instructions. The rest is the amortized cost of writing 64 KiB batches. That write lands on the one request in roughly 3,400 that fills the buffer, which is what moves p99.99 to about 7 us; handing batches to a separate I/O thread would take it off the matching path. Replaying a journal runs at about 20 million commands per second, so a million requests rebuild their book in about 50 ms.
+Journaling adds about 14 ns per request, most of it varint encoding; the CRC-32C takes about 1.5 ns on the CPU's CRC instructions. The rest is the amortized cost of writing 64 KiB batches. That write lands on the one request in roughly 3,400 that fills the buffer, which is what moves p99.99 to about 7 us. `Durability::Background` hands the batches to an I/O thread instead (see [Multi-Threaded Pipeline](#multi-threaded-pipeline)). In five interleaved runs on a busier machine, it brought p99.99 from 7.3 us down to 1.9 us, against 1.0 us with no journal at all, and the mean cost to about 12 ns. Replaying a journal runs at about 20 million commands per second, so a million requests rebuild their book in about 50 ms.
 
 ```bash
 ./build/tradematch_benchmark --engine v2 --journal bench.tmj                       # buffered (default)
+./build/tradematch_benchmark --engine v2 --journal bench.tmj --durability background
 ./build/tradematch_benchmark --engine v2 --journal bench.tmj --durability flush --ops 100000
 ./build/tradematch_replay bench.tmj                                                # rebuild the final book
 ```
@@ -660,9 +733,10 @@ Every push runs two workflows:
 | --- | --- | --- |
 | CI | Linux / GCC, Linux / Clang, macOS / Apple Clang, Windows / MSVC | Release build with warnings as errors, then the full test suite |
 | CI | Sanitizers | Every test under AddressSanitizer (with leak detection) and UndefinedBehaviorSanitizer |
+| CI | Thread sanitizer | Every test under ThreadSanitizer, covering the pipeline's threads and the journal's I/O thread |
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
 | CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
-| CI | Smoke tests | `tradematch_benchmark` runs a short workload, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform |
+| CI | Smoke tests | `tradematch_benchmark` and `tradematch_pipeline_benchmark` run short workloads, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform. The pipeline benchmark also checks its book against a single-threaded replay |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
 | Fuzz | libFuzzer | Two targets, order flow and journal/snapshot decoding, fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
@@ -671,11 +745,10 @@ Every push runs two workflows:
 
 For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It shows the ability to take a compact but failure-prone codebase and turn it into a cleaner, testable engine with explicit trade-offs, measurable behavior, and documentation that matches reality.
 
-It is also a strong stepping stone for deeper systems work: a lock-free ingress pipeline around the matching core, network gateways, or replaying real exchange feeds.
+It is also a strong stepping stone for deeper systems work: network gateways in front of the pipeline, or replaying real exchange feeds.
 
 ## Future Improvements
 
-- A multi-threaded pipeline: gateway, matcher, and publisher threads connected by lock-free rings, with the journal's disk writes moved off the matching thread
 - An interactive command line and scripted scenarios
 - A FIX gateway and a NASDAQ ITCH replay tool
 - WebAssembly and Python front ends

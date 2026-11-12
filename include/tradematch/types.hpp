@@ -95,6 +95,8 @@ struct Trade {
     Quantity quantity{};
     Side aggressor_side{Side::Buy};  // meaningless for auction trades, which have no aggressor
     bool auction{false};             // executed by an auction uncross at the single auction price
+
+    bool operator==(const Trade&) const = default;
 };
 
 // Results are plain values that never own heap memory. `trades` is a view into a buffer owned by the order book and

@@ -450,10 +450,11 @@ void test_durability_decides_when_records_reach_the_file() {
         JournalReader reader(path);
         return read_all(reader).size();
     };
-    for (const Durability durability : {Durability::Buffered, Durability::Flush, Durability::Sync}) {
+    for (const Durability durability :
+         {Durability::Buffered, Durability::Background, Durability::Flush, Durability::Sync}) {
         JournalWriter writer(path, JournalOptions{durability, true, 1});
         writer.append(commands[0]);
-        const bool buffered = durability == Durability::Buffered;
+        const bool buffered = durability == Durability::Buffered || durability == Durability::Background;
         expect(records_in_file() == (buffered ? 0U : 1U),
                "Only buffered journals should hold records back until a flush.");
         writer.flush();
@@ -578,7 +579,8 @@ void test_replaying_a_simulated_session_rebuilds_identical_books() {
     std::uint64_t live_hash = 0;
     tradematch::EngineSnapshot live;
     {
-        JournalWriter journal(path, JournalOptions{Durability::Buffered, true, 1});
+        // Background writes: the session hands dozens of 64 KiB batches to the I/O thread.
+        JournalWriter journal(path, JournalOptions{Durability::Background, true, 1});
         tradematch::MarketSimulator sim(short_day(), &journal);
         sim.run_for(60 * kSecond);  // two full days with four auctions, then part of a third
         expect(sim.stats().auctions >= 4U && sim.stats().requests > 10'000U, "The session should be busy.");

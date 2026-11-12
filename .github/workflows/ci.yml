@@ -72,6 +72,31 @@ jobs:
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --test-dir build --output-on-failure
 
+  thread-sanitizer:
+    name: Sanitizers / TSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_COMPILER=clang++
+          -DTRADEMATCH_WARNINGS_AS_ERRORS=ON -DTRADEMATCH_SANITIZERS=thread
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # ThreadSanitizer's shadow memory layout doesn't fit the 32 bits of mmap randomization recent Ubuntu kernels use.
+      - name: Reduce address-space randomization for ThreadSanitizer
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Test
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build --output-on-failure
+
   format:
     name: Format / clang-format
     runs-on: ubuntu-latest

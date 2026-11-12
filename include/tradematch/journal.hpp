@@ -4,16 +4,20 @@
 #include "tradematch/detail/codec.hpp"
 #include "tradematch/matching_engine.hpp"
 #include "tradematch/order_book.hpp"
+#include "tradematch/spsc_ring.hpp"
 #include "tradematch/types.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -53,9 +57,11 @@ public:
 
 // When an appended record reaches the operating system and the disk.
 enum class Durability : std::uint8_t {
-    Buffered,  // records are written in 64 KiB batches; a crash can lose the latest batch
-    Flush,     // each record is handed to the operating system at once, so it survives a process crash
-    Sync       // each record is forced to stable storage before append returns, so it survives power loss
+    Buffered,    // records are written in 64 KiB batches; a crash can lose the latest batch
+    Background,  // like Buffered, but a background thread writes the batches, keeping disk I/O off the appending
+                 // thread; a crash can lose the batches still in flight (up to four)
+    Flush,       // each record is handed to the operating system at once, so it survives a process crash
+    Sync         // each record is forced to stable storage before append returns, so it survives power loss
 };
 
 struct JournalOptions {
@@ -77,7 +83,8 @@ inline constexpr std::size_t kMaxSymbolNameBytes = 255;
 
 // Appends commands to a journal file. Opening an existing journal verifies every record and cuts off an incomplete
 // final record left by a crash (a torn write), so appending resumes cleanly; corruption anywhere else throws
-// JournalError rather than discarding data. Appends perform no heap allocations once the buffer has grown.
+// JournalError rather than discarding data. Appends never allocate. A writer belongs to one thread; with
+// Durability::Background it also runs an I/O thread of its own.
 class JournalWriter {
 public:
     explicit JournalWriter(const std::filesystem::path& path, const JournalOptions& options = {});
@@ -97,9 +104,9 @@ public:
     std::uint64_t append_uncross(Timestamp timestamp, SymbolId symbol);
     std::uint64_t append_expire_day_orders(Timestamp timestamp);
 
-    void flush();  // hands buffered records to the operating system
+    void flush();  // hands buffered records to the operating system, waiting for the I/O thread if there is one
     void sync();   // flushes, then forces everything to stable storage
-    void close();  // flushes (and syncs, with Durability::Sync), then closes the file
+    void close();  // flushes (and syncs, with Durability::Sync), stops the I/O thread, and closes the file
 
     // The sequence number of the last record in the journal, or first_sequence - 1 if it has none.
     std::uint64_t last_sequence() const noexcept {
@@ -120,17 +127,33 @@ public:
     }
 
 private:
-    // Records are encoded straight into the buffer after the bytes already buffered, and only end_record() counts
-    // them, so an exception while encoding leaves nothing behind.
+    // A full buffer handed to the I/O thread.
+    struct Batch {
+        std::size_t buffer{};
+        std::size_t bytes{};
+    };
+
+    // Records are encoded straight into the active buffer after the bytes already buffered, and only end_record()
+    // counts them, so an exception while encoding leaves nothing behind.
     detail::RawWriter begin_record(CommandType type, Timestamp timestamp);
     std::uint64_t end_record(const detail::RawWriter& out);
     void write_buffer();
     void check_open() const;
 
+    void start_background();
+    void hand_off();
+    void wait_until_written();
+    void check_background_error();
+    void stop_background() noexcept;
+    void background_loop() noexcept;
+    bool spin_until_woken(std::uint64_t wake) const noexcept;
+
     std::filesystem::path path_;
     std::FILE* file_{nullptr};
     Durability durability_{Durability::Buffered};
-    std::vector<std::uint8_t> buffer_;  // fixed size: a full batch plus one record of the largest size
+    std::vector<std::vector<std::uint8_t>> buffers_;  // each a full batch plus one record of the largest size
+    std::size_t active_buffer_{0};
+    std::uint8_t* active_{nullptr};
     std::size_t buffered_{0};
     Timestamp record_timestamp_{0};
     Timestamp last_timestamp_{0};
@@ -138,6 +161,18 @@ private:
     std::uint64_t file_bytes_{0};
     std::uint64_t torn_bytes_{0};
     bool failed_{false};
+
+    // Durability::Background: full buffers travel to the I/O thread through filled_ and come back through free_.
+    std::unique_ptr<SpscRing<Batch>> filled_;
+    std::unique_ptr<SpscRing<std::size_t>> free_;
+    std::uint64_t batches_submitted_{0};
+    std::atomic<std::uint64_t> batches_written_{0};
+    std::atomic<std::uint64_t> wake_{0};  // bumped whenever there is work for the I/O thread
+    std::atomic<bool> io_parked_{false};  // the I/O thread is blocked in wake_.wait() and needs a notify
+    std::atomic<bool> stopping_{false};
+    std::atomic<bool> io_failed_{false};
+    int io_errno_{0};  // written by the I/O thread before it sets io_failed_
+    std::thread io_thread_;
 };
 
 // Reads a journal from start to end, verifying every record.

@@ -2,10 +2,13 @@
 
 #include "tradematch/detail/codec.hpp"
 #include "tradematch/detail/file_io.hpp"
+#include "tradematch/detail/spin.hpp"
 #include "tradematch/snapshot.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <stdexcept>
@@ -20,6 +23,9 @@ constexpr std::array<std::uint8_t, 8> kMagic{'T', 'M', 'J', 'O', 'U', 'R', 'N', 
 constexpr std::uint32_t kFormatVersion = 1;
 constexpr std::size_t kHeaderChecksumOffset = kJournalHeaderBytes - 4;
 constexpr std::size_t kWriteThreshold = std::size_t{64} * 1'024;
+constexpr std::size_t kBufferBytes = kWriteThreshold + kJournalRecordHeaderBytes + kMaxJournalPayloadBytes;
+constexpr std::size_t kBackgroundBuffers = 4;
+constexpr auto kIoSpinWindow = std::chrono::microseconds{200};
 
 void store32(std::uint8_t* bytes, std::uint32_t value) noexcept {
     for (unsigned index = 0; index < 4U; ++index) {
@@ -125,7 +131,9 @@ const char* to_string(CommandType type) noexcept {
 JournalWriter::JournalWriter(const std::filesystem::path& path, const JournalOptions& options)
     : path_(path),
       durability_(options.durability),
-      buffer_(kWriteThreshold + kJournalRecordHeaderBytes + kMaxJournalPayloadBytes) {
+      buffers_(options.durability == Durability::Background ? kBackgroundBuffers : 1,
+               std::vector<std::uint8_t>(kBufferBytes)),
+      active_(buffers_.front().data()) {
     std::error_code error;
     const std::uintmax_t existing_bytes = std::filesystem::file_size(path, error);
     const bool resume = !options.truncate && !error && existing_bytes > 0;  // an empty file is a new journal
@@ -165,7 +173,7 @@ JournalWriter::JournalWriter(const std::filesystem::path& path, const JournalOpt
         out.fixed32(kFormatVersion);
         out.fixed64(next_sequence_);
         out.fixed32(detail::crc32c(header));
-        std::ranges::copy(header, buffer_.begin());
+        std::ranges::copy(header, active_);
         buffered_ = header.size();
         try {
             write_buffer();
@@ -180,20 +188,23 @@ JournalWriter::JournalWriter(const std::filesystem::path& path, const JournalOpt
             throw;
         }
     }
+    if (durability_ == Durability::Background) {
+        try {
+            start_background();
+        } catch (const std::system_error&) {
+            std::fclose(file_);
+            file_ = nullptr;
+            throw;
+        }
+    }
 }
 
 JournalWriter::~JournalWriter() {
-    if (file_ == nullptr) {
-        return;
-    }
     try {
         close();
     } catch (const std::exception&) {
-        // A destructor can't report the failure (close() can), but it must still release the file.
-        if (file_ != nullptr) {
-            std::fclose(file_);
-            file_ = nullptr;
-        }
+        // A destructor can't report the failure; close() has still stopped the I/O thread and released the file.
+        failed_ = true;
     }
 }
 
@@ -210,14 +221,14 @@ detail::RawWriter JournalWriter::begin_record(CommandType type, Timestamp timest
     check_open();
     record_timestamp_ = timestamp;
     // The length and checksum go in front of the payload once it is complete.
-    detail::RawWriter out(buffer_.data() + buffered_ + kJournalRecordHeaderBytes);
+    detail::RawWriter out(active_ + buffered_ + kJournalRecordHeaderBytes);
     out.u8(static_cast<std::uint8_t>(type));
     out.svarint(timestamp_delta(last_timestamp_, timestamp));
     return out;
 }
 
 std::uint64_t JournalWriter::end_record(const detail::RawWriter& out) {
-    std::uint8_t* const header = buffer_.data() + buffered_;
+    std::uint8_t* const header = active_ + buffered_;
     std::uint8_t* const payload = header + kJournalRecordHeaderBytes;
     const auto length = static_cast<std::size_t>(out.position() - payload);
     store32(header, static_cast<std::uint32_t>(length));
@@ -226,7 +237,11 @@ std::uint64_t JournalWriter::end_record(const detail::RawWriter& out) {
     last_timestamp_ = record_timestamp_;
     const std::uint64_t sequence = next_sequence_++;
 
-    if (durability_ != Durability::Buffered || buffered_ >= kWriteThreshold) {
+    if (durability_ == Durability::Background) {
+        if (buffered_ >= kWriteThreshold) {
+            hand_off();
+        }
+    } else if (durability_ != Durability::Buffered || buffered_ >= kWriteThreshold) {
         write_buffer();
         if (durability_ == Durability::Sync && !detail::sync_file(file_)) {
             failed_ = true;
@@ -240,7 +255,7 @@ void JournalWriter::write_buffer() {
     if (buffered_ == 0U) {
         return;
     }
-    if (std::fwrite(buffer_.data(), 1, buffered_, file_) != buffered_) {
+    if (std::fwrite(active_, 1, buffered_, file_) != buffered_) {
         failed_ = true;
         throw JournalError("cannot write " + path_.string() + ": " + detail::last_error());
     }
@@ -323,6 +338,14 @@ std::uint64_t JournalWriter::append_expire_day_orders(Timestamp timestamp) {
 
 void JournalWriter::flush() {
     check_open();
+    if (durability_ == Durability::Background) {
+        if (buffered_ != 0U) {
+            hand_off();
+        }
+        wait_until_written();
+        check_background_error();
+        return;
+    }
     write_buffer();
 }
 
@@ -338,15 +361,136 @@ void JournalWriter::close() {
     if (file_ == nullptr) {
         return;
     }
-    if (durability_ == Durability::Sync) {
-        sync();
-    } else {
-        flush();
+    std::string failure;
+    try {
+        if (durability_ == Durability::Sync) {
+            sync();
+        } else {
+            flush();
+        }
+    } catch (const JournalError& error) {
+        failure = error.what();
     }
-    const bool closed = std::fclose(file_) == 0;
+    // Whatever happened, stop the I/O thread and release the file.
+    stop_background();
+    if (std::fclose(file_) != 0 && failure.empty()) {
+        failure = "cannot close " + path_.string() + ": " + detail::last_error();
+    }
     file_ = nullptr;
-    if (!closed) {
-        throw JournalError("cannot close " + path_.string() + ": " + detail::last_error());
+    if (!failure.empty()) {
+        throw JournalError(failure);
+    }
+}
+
+void JournalWriter::start_background() {
+    filled_ = std::make_unique<SpscRing<Batch>>(buffers_.size());
+    free_ = std::make_unique<SpscRing<std::size_t>>(buffers_.size());
+    for (std::size_t buffer = 1; buffer < buffers_.size(); ++buffer) {
+        free_->try_push(buffer);
+    }
+    io_thread_ = std::thread([this] { background_loop(); });
+}
+
+// Queues the active buffer for the I/O thread and continues in a free one. Waits only if every buffer is in flight,
+// which applies backpressure when the disk can't keep up.
+void JournalWriter::hand_off() {
+    check_background_error();
+    filled_->try_push(Batch{active_buffer_, buffered_});  // can't fail: the ring has a slot for every buffer
+    file_bytes_ += buffered_;
+    buffered_ = 0;
+    ++batches_submitted_;
+    // A wake-up costs a system call, so it is only sent when the I/O thread has actually parked. Both sides use
+    // sequentially consistent operations here: either the I/O thread sees the new wake_ value before parking, or this
+    // thread sees io_parked_ and notifies it, so no wake-up can be lost.
+    wake_.fetch_add(1, std::memory_order_seq_cst);
+    if (io_parked_.load(std::memory_order_seq_cst)) {
+        wake_.notify_one();
+    }
+
+    std::size_t next = 0;
+    while (!free_->try_pop(next)) {
+        const std::uint64_t written = batches_written_.load(std::memory_order_acquire);
+        if (free_->try_pop(next)) {
+            break;
+        }
+        batches_written_.wait(written, std::memory_order_acquire);
+    }
+    active_buffer_ = next;
+    active_ = buffers_[next].data();
+}
+
+void JournalWriter::wait_until_written() {
+    while (true) {
+        const std::uint64_t written = batches_written_.load(std::memory_order_acquire);
+        if (written >= batches_submitted_) {
+            return;
+        }
+        batches_written_.wait(written, std::memory_order_acquire);
+    }
+}
+
+void JournalWriter::check_background_error() {
+    if (io_failed_.load(std::memory_order_acquire)) {
+        failed_ = true;
+        throw JournalError("cannot write " + path_.string() + ": " + std::generic_category().message(io_errno_));
+    }
+}
+
+void JournalWriter::stop_background() noexcept {
+    if (!io_thread_.joinable()) {
+        return;
+    }
+    stopping_.store(true, std::memory_order_seq_cst);
+    wake_.fetch_add(1, std::memory_order_seq_cst);
+    wake_.notify_one();
+    io_thread_.join();
+}
+
+// The I/O thread: writes batches in order and returns their buffers. After a failed write it stops writing, so
+// nothing lands after a gap, but keeps returning buffers so the appending thread never blocks; the appending thread
+// reports the error on its next hand-off or flush.
+void JournalWriter::background_loop() noexcept {
+    Batch batch;
+    while (true) {
+        const std::uint64_t wake = wake_.load(std::memory_order_acquire);
+        const bool stopping = stopping_.load(std::memory_order_acquire);
+        while (filled_->try_pop(batch)) {
+            if (!io_failed_.load(std::memory_order_relaxed) &&
+                std::fwrite(buffers_[batch.buffer].data(), 1, batch.bytes, file_) != batch.bytes) {
+                io_errno_ = errno;
+                io_failed_.store(true, std::memory_order_release);
+            }
+            free_->try_push(batch.buffer);
+            batches_written_.fetch_add(1, std::memory_order_release);
+            batches_written_.notify_one();
+        }
+        if (stopping) {
+            return;  // every batch handed off before the stop request has been written
+        }
+        // Under load the next batch arrives within the spin window, so the appending thread never has to pay for a
+        // wake-up. Otherwise the thread parks instead of burning a core.
+        if (spin_until_woken(wake)) {
+            continue;
+        }
+        io_parked_.store(true, std::memory_order_seq_cst);
+        if (wake_.load(std::memory_order_seq_cst) == wake) {
+            wake_.wait(wake, std::memory_order_acquire);
+        }
+        io_parked_.store(false, std::memory_order_relaxed);
+    }
+}
+
+bool JournalWriter::spin_until_woken(std::uint64_t wake) const noexcept {
+    const auto deadline = std::chrono::steady_clock::now() + kIoSpinWindow;
+    detail::Backoff backoff;
+    for (unsigned round = 1;; ++round) {
+        if (wake_.load(std::memory_order_acquire) != wake) {
+            return true;
+        }
+        backoff.pause();
+        if (round % 64U == 0U && std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
     }
 }
 

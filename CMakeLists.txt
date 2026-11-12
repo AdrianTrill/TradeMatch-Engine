@@ -38,7 +38,9 @@ if(TRADEMATCH_COVERAGE)
     if(MSVC)
         message(FATAL_ERROR "TRADEMATCH_COVERAGE is only supported with GCC and Clang")
     endif()
-    target_compile_options(tradematch_project_options INTERFACE --coverage)
+    # Several threads bump the same counters (the pipeline's polling loops above all), so the updates must be atomic;
+    # otherwise increments are lost and gcov can even read negative hit counts.
+    target_compile_options(tradematch_project_options INTERFACE --coverage -fprofile-update=atomic)
     target_link_options(tradematch_project_options INTERFACE --coverage)
 endif()
 
@@ -50,12 +52,15 @@ set(TRADEMATCH_ENGINE_SOURCES
     src/market_data.cpp
     src/matching_engine.cpp
     src/order_book.cpp
+    src/pipeline.cpp
     src/snapshot.cpp
 )
 
+find_package(Threads REQUIRED)
+
 add_library(tradematch_engine ${TRADEMATCH_ENGINE_SOURCES})
 target_include_directories(tradematch_engine PUBLIC ${PROJECT_SOURCE_DIR}/include)
-target_link_libraries(tradematch_engine PRIVATE tradematch_project_options)
+target_link_libraries(tradematch_engine PUBLIC Threads::Threads PRIVATE tradematch_project_options)
 
 add_library(tradematch_sim src/simulator.cpp)
 target_link_libraries(tradematch_sim PUBLIC tradematch_engine PRIVATE tradematch_project_options)
@@ -78,6 +83,9 @@ target_link_libraries(tradematch_bench_support PUBLIC tradematch_engine PRIVATE 
 
 add_executable(tradematch_benchmark bench/benchmark_main.cpp)
 target_link_libraries(tradematch_benchmark PRIVATE tradematch_bench_support tradematch_project_options)
+
+add_executable(tradematch_pipeline_benchmark bench/pipeline_main.cpp)
+target_link_libraries(tradematch_pipeline_benchmark PRIVATE tradematch_bench_support tradematch_project_options)
 
 include(CTest)
 
@@ -105,6 +113,11 @@ if(BUILD_TESTING)
     add_test(NAME tradematch_replay_roundtrip
              COMMAND ${CMAKE_COMMAND} -DTUI=$<TARGET_FILE:tradematch_tui> -DREPLAY=$<TARGET_FILE:tradematch_replay>
                      -DJOURNAL=${CMAKE_CURRENT_BINARY_DIR}/replay_roundtrip.tmj -P ${PROJECT_SOURCE_DIR}/cmake/replay_roundtrip.cmake)
+
+    add_executable(tradematch_pipeline_tests tests/pipeline_tests.cpp)
+    target_include_directories(tradematch_pipeline_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(tradematch_pipeline_tests PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_pipeline_tests COMMAND tradematch_pipeline_tests)
 
     add_executable(tradematch_order_index_tests tests/order_index_tests.cpp)
     target_link_libraries(tradematch_order_index_tests PRIVATE tradematch_engine tradematch_project_options)
@@ -139,6 +152,9 @@ if(BUILD_TESTING)
 
     add_test(NAME tradematch_benchmark_smoke
              COMMAND tradematch_benchmark --ops 20000 --warmup 2000 --prefill 1000 --no-distribution)
+    # Also checks that the threaded pipeline's book matches a single-threaded replay.
+    add_test(NAME tradematch_pipeline_benchmark_smoke
+             COMMAND tradematch_pipeline_benchmark --ops 50000 --warmup 5000 --prefill 1000 --share-cores)
 endif()
 
 if(TRADEMATCH_LIBFUZZER)
@@ -152,6 +168,7 @@ if(TRADEMATCH_LIBFUZZER)
         target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests)
         target_compile_options(${target} PRIVATE -g -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
         target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+        target_link_libraries(${target} PRIVATE Threads::Threads)
     endfunction()
     tradematch_add_fuzzer(tradematch_fuzzer fuzz/order_book_fuzzer.cpp)
     tradematch_add_fuzzer(tradematch_journal_fuzzer fuzz/journal_fuzzer.cpp)

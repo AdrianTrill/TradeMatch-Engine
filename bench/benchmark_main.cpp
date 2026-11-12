@@ -54,13 +54,16 @@ tradematch::Durability parse_durability(const std::string& name) {
     if (name == "buffered") {
         return tradematch::Durability::Buffered;
     }
+    if (name == "background") {
+        return tradematch::Durability::Background;
+    }
     if (name == "flush") {
         return tradematch::Durability::Flush;
     }
     if (name == "sync") {
         return tradematch::Durability::Sync;
     }
-    throw std::invalid_argument("--durability must be buffered, flush, or sync");
+    throw std::invalid_argument("--durability must be buffered, background, flush, or sync");
 }
 
 struct ClockProfile {
@@ -95,7 +98,7 @@ std::uint64_t parse_number(std::string_view flag, const std::string& value) {
 void print_usage() {
     std::cout << "usage: tradematch_benchmark [measured_ops] [--ops N] [--warmup N] [--prefill N] [--seed S]\n"
                  "                            [--engine v1|v2|both] [--json FILE] [--no-distribution]\n"
-                 "                            [--journal FILE [--durability buffered|flush|sync]]\n";
+                 "                            [--journal FILE [--durability buffered|background|flush|sync]]\n";
 }
 
 // Returns false when the program should exit immediately (after --help).

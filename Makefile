@@ -1,12 +1,13 @@
 CXX ?= c++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Wpedantic -Wshadow
 CPPFLAGS += -Iinclude -Itests -Ibench
+LDFLAGS += -pthread
 DEPFLAGS = -MMD -MP
 BUILD_DIR ?= build
 OBJ_DIR := $(BUILD_DIR)/obj
 
 ENGINE_SRC := src/codec.cpp src/file_io.cpp src/formatting.cpp src/journal.cpp src/market_data.cpp \
-	src/matching_engine.cpp src/order_book.cpp src/snapshot.cpp
+	src/matching_engine.cpp src/order_book.cpp src/pipeline.cpp src/snapshot.cpp
 ENGINE_OBJ := $(ENGINE_SRC:%.cpp=$(OBJ_DIR)/%.o)
 
 DEMO_BIN := $(BUILD_DIR)/tradematch_demo
@@ -15,6 +16,8 @@ REPLAY_BIN := $(BUILD_DIR)/tradematch_replay
 SIM_TEST_BIN := $(BUILD_DIR)/tradematch_simulator_tests
 JOURNAL_TEST_BIN := $(BUILD_DIR)/tradematch_journal_tests
 JOURNAL_FUZZ_BIN := $(BUILD_DIR)/tradematch_journal_fuzz_standalone
+PIPELINE_TEST_BIN := $(BUILD_DIR)/tradematch_pipeline_tests
+PIPELINE_BENCH_BIN := $(BUILD_DIR)/tradematch_pipeline_benchmark
 BENCH_BIN := $(BUILD_DIR)/tradematch_benchmark
 TEST_BIN := $(BUILD_DIR)/tradematch_tests
 DIFF_TEST_BIN := $(BUILD_DIR)/tradematch_differential_tests
@@ -45,6 +48,8 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/src/simulator.o \
 	$(OBJ_DIR)/tests/simulator_tests.o \
 	$(OBJ_DIR)/tests/journal_tests.o \
+	$(OBJ_DIR)/tests/pipeline_tests.o \
+	$(OBJ_DIR)/bench/pipeline_main.o \
 	$(OBJ_DIR)/bench/benchmark_main.o \
 	$(OBJ_DIR)/bench/workload.o \
 	$(OBJ_DIR)/bench/baseline/map_order_book.o \
@@ -58,11 +63,12 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/fuzz/journal_fuzzer.o \
 	$(OBJ_DIR)/fuzz/standalone_main.o
 
-.PHONY: all test demo tui replay-demo benchmark fuzz-long format format-check lint sanitize coverage \
-	cmake-configure cmake-build clean
+.PHONY: all test demo tui replay-demo benchmark pipeline-benchmark fuzz-long format format-check lint sanitize tsan \
+	coverage cmake-configure cmake-build clean
 
-all: $(DEMO_BIN) $(TUI_BIN) $(REPLAY_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) \
-	$(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) $(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
+all: $(DEMO_BIN) $(TUI_BIN) $(REPLAY_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) $(BENCH_BIN) \
+	$(PIPELINE_BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
+	$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
 
 # Each object also emits a .d file listing the headers it includes, so header edits trigger rebuilds.
 $(OBJ_DIR)/%.o: %.cpp
@@ -86,6 +92,12 @@ $(REPLAY_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/replay_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(JOURNAL_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tests/journal_tests.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(PIPELINE_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/pipeline_tests.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(PIPELINE_BENCH_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/bench/pipeline_main.o $(OBJ_DIR)/bench/workload.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BENCH_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/bench/benchmark_main.o $(OBJ_DIR)/bench/workload.o \
@@ -118,10 +130,11 @@ $(JOURNAL_FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/journal_fuzzer.o $(OBJ_DIR)/f
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
-		$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) replay-demo
+		$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(PIPELINE_TEST_BIN) replay-demo
 	./$(TEST_BIN)
 	./$(SIM_TEST_BIN)
 	./$(JOURNAL_TEST_BIN)
+	./$(PIPELINE_TEST_BIN)
 	./$(MARKET_DATA_TEST_BIN)
 	./$(INDEX_TEST_BIN)
 	./$(ALLOC_TEST_BIN)
@@ -151,6 +164,10 @@ tui: $(TUI_BIN)
 benchmark: $(BENCH_BIN)
 	./$(BENCH_BIN)
 
+# End-to-end latency through the gateway, matcher, and publisher threads at one million requests per second.
+pipeline-benchmark: $(PIPELINE_BENCH_BIN)
+	./$(PIPELINE_BENCH_BIN) --rate 1000000
+
 format:
 	$(CLANG_FORMAT) -i $(SOURCES)
 
@@ -166,6 +183,13 @@ sanitize:
 		-DTRADEMATCH_SANITIZERS=address,undefined > /dev/null
 	cmake --build $(BUILD_DIR)/sanitize --parallel $(JOBS)
 	ctest --test-dir $(BUILD_DIR)/sanitize --output-on-failure
+
+# Every test under ThreadSanitizer, which checks the pipeline's threads and the journal's I/O thread for data races.
+tsan:
+	cmake -S . -B $(BUILD_DIR)/tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTRADEMATCH_WARNINGS_AS_ERRORS=ON \
+		-DTRADEMATCH_SANITIZERS=thread > /dev/null
+	cmake --build $(BUILD_DIR)/tsan --parallel $(JOBS)
+	TSAN_OPTIONS=halt_on_error=1 ctest --test-dir $(BUILD_DIR)/tsan --output-on-failure
 
 coverage:
 	cmake -S . -B $(BUILD_DIR)/coverage -DCMAKE_BUILD_TYPE=Debug -DTRADEMATCH_COVERAGE=ON > /dev/null
