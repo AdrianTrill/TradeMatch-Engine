@@ -5,7 +5,8 @@ import { BookView } from './book.js';
 import { PriceChart, TIMEFRAMES } from './chart.js';
 import { DepthChart } from './depth.js';
 import { $, element, text } from './dom.js';
-import { clock, grouped, price } from './format.js';
+import { grouped, price } from './format.js';
+import { Quote, Session, Tickers } from './header.js';
 import { CandleHistory } from './history.js';
 import { readPalette } from './palette.js';
 import { TapeView } from './tape.js';
@@ -62,6 +63,9 @@ const market = {
 };
 
 const chart = new PriceChart($('#candles'), $('#legend'), $('#live'));
+const tickers = new Tickers($('#tickers'), (index) => selectSymbol(index));
+const quote = new Quote($('#quote').parentElement);
+const session = new Session($('#session'));
 const depth = new DepthChart($('#depth'));
 const book = new BookView($('#book'));
 const tape = new TapeView($('#tape'));
@@ -73,7 +77,7 @@ function newMarket(seed, skip = 0) {
   market.instance = new tradematch.LiveMarket(seed);
   market.instance.step(Math.round(skip / STEP_SECONDS));
   market.seed = seed;
-  market.lastPrice = null;
+  quote.reset();
   market.histories = [];
   const phases = JSON.parse(market.instance.config()).phases.map(([, length]) => length);
   market.config = {
@@ -114,27 +118,9 @@ function measureSpeed() {
   }, 50);
 }
 
-function renderSymbols(view) {
-  if (view.symbols.join() !== market.symbols.join()) {
-    market.symbols = view.symbols;
-    $('#tickers').replaceChildren(...view.symbols.map((name, index) => {
-      const button = element('button', 'ticker', `<span class="ticker-name">${name}</span><span class="ticker-detail">–</span>`);
-      button.setAttribute('role', 'tab');
-      button.addEventListener('click', () => selectSymbol(index));
-      return button;
-    }));
-  }
-  [...$('#tickers').children].forEach((button, index) => {
-    button.setAttribute('aria-selected', String(index === market.symbol));
-    if (index === market.symbol) {
-      text(button.lastElementChild, view.last === null ? '–' : price(view.last));
-    }
-  });
-}
-
 function selectSymbol(index) {
   market.symbol = index;
-  market.lastPrice = null;
+  quote.reset();
   chart.reset();
 }
 
@@ -143,20 +129,34 @@ function history(index) {
   return market.histories[index];
 }
 
-function render(view, candles) {
-  renderSymbols(view);
-  const last = $('#last');
-  if (view.last !== null && view.last !== market.lastPrice) {
-    last.className = `quote-price${market.lastPrice === null ? '' : view.last > market.lastPrice ? ' up' : ' down'}`;
-    market.lastPrice = view.last;
+// While a call auction collects orders, what its uncross would do right now.
+function renderAuction(view) {
+  const status = $('#auction-status');
+  const auction = view.phase.includes('AUCTION');
+  status.hidden = !auction;
+  $('#chart-hint').hidden = auction;
+  $('#depth-note').textContent = auction && view.auction
+    ? 'Buyers and sellers by price: the uncross is where they cross'
+    : 'Cumulative size by price';
+  if (!auction) {
+    return;
   }
-  text(last, view.last === null ? '–' : price(view.last));
-  text($('#change'), `${grouped(view.volume)} shares traded`);
+  const kind = view.phase === 'OPENING AUCTION' ? 'Opening' : 'Closing';
+  if (!view.auction) {
+    text(status, `${kind} auction · no orders cross yet`);
+    return;
+  }
+  const { price: uncross, matched, buy_surplus: buys, sell_surplus: sells } = view.auction;
+  const imbalance = buys > sells ? `${grouped(buys - sells)} more to buy` : sells > buys
+    ? `${grouped(sells - buys)} more to sell` : 'balanced';
+  text(status, `${kind} auction · would trade ${grouped(matched)} at ${price(uncross)} · ${imbalance}`);
+}
 
-  const phase = $('#phase');
-  text(phase, view.phase);
-  phase.className = `phase${view.phase.includes('AUCTION') ? ' auction' : ''}${view.phase === 'CLOSED' ? ' closed' : ''}`;
-  text($('#clock'), `Day ${view.day} · ${clock(view.time, market.config.dayLength / 1e9)}`);
+function render(view, candles) {
+  tickers.update(view.watch, market.symbol);
+  quote.update(view.watch[market.symbol]);
+  session.update(view, market.config);
+  renderAuction(view);
 
   text($('#requests'), grouped(view.requests));
   text($('#trades'), grouped(view.trade_count));
@@ -199,22 +199,47 @@ function setRunning(running) {
   text($('#engine-state'), running ? 'Engine running' : 'Engine paused');
 }
 
+const speedName = (speed) => `${speed === 0.5 ? '½' : speed}×`;
+
 function setSpeed(speed) {
   market.speed = speed;
-  for (const button of $('#speed').children) {
-    button.setAttribute('aria-checked', String(Number(button.dataset.speed) === speed));
+  text($('#speed-label'), speedName(speed));
+  for (const item of $('#speed').children) {
+    item.setAttribute('aria-checked', String(Number(item.dataset.speed) === speed));
   }
 }
 
-for (const speed of SPEEDS) {
-  const button = element('button');
-  button.textContent = `${speed === 0.5 ? '½' : speed}×`;
-  button.dataset.speed = speed;
-  button.setAttribute('role', 'radio');
-  button.title = `${speed} simulated second${speed === 1 ? '' : 's'} per second`;
-  button.addEventListener('click', () => setSpeed(speed));
-  $('#speed').append(button);
+function toggleSpeedMenu(open) {
+  $('#speed').hidden = !open;
+  $('#speed-button').setAttribute('aria-expanded', String(open));
 }
+
+for (const speed of SPEEDS) {
+  const item = element('button', 'menu-item');
+  item.innerHTML = `<span>${speedName(speed)}</span><span class="menu-note">${
+    speed === 1 ? 'real time' : `${speed} s a second`}</span>`;
+  item.dataset.speed = speed;
+  item.setAttribute('role', 'menuitemradio');
+  item.addEventListener('click', () => {
+    setSpeed(speed);
+    toggleSpeedMenu(false);
+  });
+  $('#speed').append(item);
+}
+$('#speed-button').addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleSpeedMenu($('#speed').hidden);
+});
+document.addEventListener('click', (event) => {
+  if (!$('#speed').hidden && !$('#speed').contains(event.target)) {
+    toggleSpeedMenu(false);
+  }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    toggleSpeedMenu(false);
+  }
+});
 
 for (const seconds of TIMEFRAMES) {
   const button = element('button');

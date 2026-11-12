@@ -59,6 +59,21 @@ if (dayLength === 100e9 && since.length === 1 && since[0][0] === newest &&
   failures += 1;
   console.log(`[FAIL] chart data: since=${JSON.stringify(since)} crosses=${JSON.stringify(view.crosses)}`);
 }
+
+// The market watch has every symbol, and an auction shows what its uncross would do.
+const watched = view.watch.map((summary) => summary.symbol).join();
+let auction = null;
+for (let step = 0; step < 10_000 && !auction; step += 1) {  // until the next call auction, within 100 s
+  market.step(1);
+  auction = JSON.parse(market.snapshot(0, 1, Infinity)).auction;
+}
+if (watched === view.symbols.join() && view.watch.every((summary) => summary.spark.length > 0 && summary.volume > 0 &&
+    summary.high >= summary.low) && auction && auction.price > 0 && auction.matched > 0) {
+  console.log(`[PASS] market watch and auction: ${watched}; indicative ${auction.matched} @ ${auction.price}`);
+} else {
+  failures += 1;
+  console.log(`[FAIL] market watch and auction: ${JSON.stringify(view.watch).slice(0, 200)} ${JSON.stringify(auction)}`);
+}
 market.delete();
 
 const terminal = new tradematch.Terminal();

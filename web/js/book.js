@@ -42,6 +42,14 @@ export class BookView {
     this.askCells.forEach((cells, index) => fill(cells, asks[count - 1 - index], largest));
     this.bidCells.forEach((cells, index) => fill(cells, bids[index], largest));
 
+    // During a call auction the middle of the book shows the price the uncross would trade at.
+    if (view.auction) {
+      this.midPrice.className = 'mid-price auction';
+      this.lastPrice = null;
+      text(this.midPrice, price(view.auction.price));
+      text(this.midNote, `Indicative uncross · ${grouped(view.auction.matched)} would trade`);
+      return;
+    }
     if (view.last !== null && view.last !== this.lastPrice) {
       this.midPrice.className = `mid-price${this.lastPrice === null ? '' : view.last > this.lastPrice ? ' up' : ' down'}`;
       this.lastPrice = view.last;
@@ -49,7 +57,9 @@ export class BookView {
     text(this.midPrice, view.last === null ? '–' : price(view.last));
     const bid = view.bids[0]?.[0];
     const ask = view.asks[0]?.[0];
-    if (bid === undefined || ask === undefined) {
+    if (view.phase.includes('AUCTION')) {
+      text(this.midNote, 'Call auction: nothing would trade yet');
+    } else if (bid === undefined || ask === undefined) {
       text(this.midNote, 'One side of the book is empty');
     } else if (bid >= ask) {
       text(this.midNote, 'Crossed until the auction uncrosses');

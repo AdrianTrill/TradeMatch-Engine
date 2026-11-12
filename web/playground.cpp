@@ -40,6 +40,7 @@ void levels(std::ostringstream& json, const std::vector<tradematch::DepthLevel>&
 
 constexpr tradematch::Timestamp kSecond = 1'000'000'000;
 constexpr std::size_t kMaxCandles = 20'000;  // one-second candles sent at most, the newest
+constexpr std::size_t kSparkline = 60;       // closing prices of the last minute's candles, for the market watch
 
 void number_or_null(std::ostringstream& json, std::optional<double> value) {
     if (value) {
@@ -50,8 +51,8 @@ void number_or_null(std::ostringstream& json, std::optional<double> value) {
 }
 
 // The agent-based market of the terminal UI: three stocks trading through opening auctions, continuous trading, and
-// closing auctions, day after day. It listens to the exchange's order-level events to keep each day's VWAP and every
-// auction cross, and samples each stock's fair value and VWAP once a simulated second, for the chart.
+// closing auctions, day after day. It listens to the exchange's order-level events to keep each day's high, low,
+// volume, and VWAP, and every auction cross, and samples each stock's fair value and VWAP once a simulated second.
 class LiveMarket final : public tradematch::OrderFeedListener {
 public:
     explicit LiveMarket(unsigned seed) {
@@ -87,6 +88,8 @@ public:
                 for (Instrument& instrument : instruments_) {
                     instrument.day_value = 0.0;
                     instrument.day_volume = 0;
+                    instrument.day_high.reset();
+                    instrument.day_low.reset();
                 }
             }
             // Each second that ends is sampled once: samples[s] holds the values at the end of second s.
@@ -107,6 +110,8 @@ public:
         for (const tradematch::Trade& trade : trades) {
             instrument.day_value += static_cast<double>(trade.price) * static_cast<double>(trade.quantity);
             instrument.day_volume += trade.quantity;
+            instrument.day_high = std::max(instrument.day_high.value_or(trade.price), trade.price);
+            instrument.day_low = std::min(instrument.day_low.value_or(trade.price), trade.price);
             if (trade.auction) {
                 if (instrument.crosses.empty() || instrument.crosses.back().time != now) {
                     instrument.crosses.push_back(Cross{now, trade.price, 0});
@@ -125,9 +130,9 @@ public:
         return json.str();
     }
 
-    // One symbol's view as JSON: the session, the top `depth` levels of each side, recent trades, the day's auction
-    // crosses, and its one-second candles from the one starting at `since` on: all of them if `since` is negative, and
-    // none if it is later than now.
+    // One symbol's view as JSON: the session, every symbol's summary, the top `depth` levels of each side, the
+    // indicative uncross during an auction, recent trades, the auction crosses, and its one-second candles from the one
+    // starting at `since` on: all of them if `since` is negative, and none if it is later than now.
     std::string snapshot(int symbol_index, int depth, double since) const {
         const std::size_t index =
             std::min(static_cast<std::size_t>(std::max(symbol_index, 0)), simulator_->symbol_count() - 1);
@@ -146,7 +151,23 @@ public:
             json << (other == 0 ? "" : ",") << '"' << simulator_->engine().symbol_name(simulator_->symbol(other))
                  << '"';
         }
-        json << "],\"last\":";
+        json << "],\"watch\":[";
+        for (std::size_t other = 0; other < simulator_->symbol_count(); ++other) {
+            watch(json, other);
+            json << (other + 1 < simulator_->symbol_count() ? "," : "");
+        }
+        json << "],\"auction\":";
+        if (const auto indicative = simulator_->session() == tradematch::SessionPhase::OpeningAuction ||
+                                            simulator_->session() == tradematch::SessionPhase::ClosingAuction
+                                        ? simulator_->engine().book(symbol).indicative_auction()
+                                        : std::nullopt) {
+            json << "{\"price\":" << indicative->price << ",\"matched\":" << indicative->matched_quantity
+                 << ",\"buy_surplus\":" << indicative->buy_surplus << ",\"sell_surplus\":" << indicative->sell_surplus
+                 << '}';
+        } else {
+            json << "null";
+        }
+        json << ",\"last\":";
         price_or_null(json, feed.last_price(symbol));
         json << ",\"fair\":" << simulator_->fair_value(index) << ",\"vwap\":";
         number_or_null(json, vwap(index));
@@ -207,6 +228,30 @@ public:
     }
 
 private:
+    // A symbol's summary for the market watch: its name, last price, day open, previous close, the day's high, low,
+    // and volume, and the closes of its last minute of candles.
+    void watch(std::ostringstream& json, std::size_t index) const {
+        const tradematch::SymbolId symbol = simulator_->symbol(index);
+        const Instrument& instrument = instruments_[index];
+        json << "{\"symbol\":\"" << simulator_->engine().symbol_name(symbol) << "\",\"last\":";
+        price_or_null(json, simulator_->feed().last_price(symbol));
+        json << ",\"open\":";
+        price_or_null(json, simulator_->day_open(index));
+        json << ",\"previous_close\":";
+        price_or_null(json, simulator_->previous_close(index));
+        json << ",\"high\":";
+        price_or_null(json, instrument.day_high);
+        json << ",\"low\":";
+        price_or_null(json, instrument.day_low);
+        json << ",\"volume\":" << instrument.day_volume << ",\"spark\":[";
+        const auto& candles = simulator_->feed().candles(symbol).candles();
+        const std::size_t first = candles.size() > kSparkline ? candles.size() - kSparkline : 0;
+        for (std::size_t position = first; position < candles.size(); ++position) {
+            json << (position == first ? "" : ",") << candles[position].close;
+        }
+        json << "]}";
+    }
+
     struct Sample {
         tradematch::Price fair{};
         std::optional<double> vwap;
@@ -219,6 +264,8 @@ private:
     struct Instrument {
         double day_value{0.0};
         tradematch::Volume day_volume{0};
+        std::optional<tradematch::Price> day_high;
+        std::optional<tradematch::Price> day_low;
         std::vector<Sample> samples;  // by second
         std::vector<Cross> crosses;
     };

@@ -16,9 +16,11 @@ export class DepthChart {
     if (bids.length === 0 && asks.length === 0) {
       return;
     }
+    // During a call auction the book may cross: the chart then centres on the uncross price, where the buyers' curve
+    // meets the sellers'.
     const bestBid = bids[0]?.[0] ?? asks[0][0];
     const bestAsk = asks[0]?.[0] ?? bids[0][0];
-    const mid = (bestBid + bestAsk) / 2;
+    const mid = view.auction ? view.auction.price : (bestBid + bestAsk) / 2;
     const reach = Math.max(1, mid - (bids.at(-1)?.[0] ?? mid), (asks.at(-1)?.[0] ?? mid) - mid);
     const total = (levels) => levels.reduce((sum, level) => sum + level[1], 0);
     const most = Math.max(1, total(bids), total(asks)) * 1.12;
@@ -45,7 +47,7 @@ export class DepthChart {
 
     // The mid price, and prices along the bottom.
     context.setLineDash([3, 4]);
-    context.strokeStyle = palette.faint;
+    context.strokeStyle = view.auction ? palette.auction : palette.faint;
     context.beginPath();
     context.moveTo(crisp(x(mid)), 16);
     context.lineTo(crisp(x(mid)), bottom);
@@ -53,8 +55,8 @@ export class DepthChart {
     context.setLineDash([]);
     context.textAlign = 'center';
     context.font = font(10.5, 600);
-    context.fillStyle = palette.text2;
-    context.fillText(`MID ${(mid / 100).toFixed(3)}`, x(mid), 12);
+    context.fillStyle = view.auction ? palette.auction : palette.text2;
+    context.fillText(view.auction ? `UNCROSS ${price(mid)}` : `MID ${(mid / 100).toFixed(3)}`, x(mid), 12);
     context.font = font(10.5);
     context.fillStyle = palette.muted;
     for (const value of [mid - reach * 0.66, mid + reach * 0.66]) {

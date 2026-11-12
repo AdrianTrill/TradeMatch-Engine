@@ -167,12 +167,14 @@ await check('the market runs, and pausing stops it', async () => {
 
 await check('the symbols and speeds switch', async () => {
   await page.click('.ticker:nth-child(2)');
-  await page.click('#speed button:nth-child(5)');
+  await page.click('#speed-button');
+  await page.click('#speed .menu-item:nth-child(5)');
   await sleep(300);
   const selected = await page.$$eval('.ticker', (tickers) => tickers.map((ticker) => ticker.getAttribute('aria-selected')));
-  const speed = await page.$eval('#speed [aria-checked="true"]', (button) => button.textContent);
+  const speed = await read('#speed-label');
   expect(selected.join() === 'false,true,false', `selected tickers: ${selected}`);
   expect(speed === '10×', `speed ${speed}`);
+  expect(await page.$eval('#speed', (menu) => menu.hidden), 'the speed menu should close');
 });
 
 await check('the command line runs an example', async () => {

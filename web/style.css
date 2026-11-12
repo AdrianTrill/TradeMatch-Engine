@@ -368,11 +368,12 @@ button {
 }
 
 .ticker {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  min-width: 92px;
-  padding: 5px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px;
+  gap: 1px 10px;
+  align-items: center;
+  min-width: 0;
+  padding: 6px 10px 6px 12px;
   border: 1px solid transparent;
   border-radius: var(--radius);
   background: transparent;
@@ -391,28 +392,75 @@ button {
 }
 
 .ticker-name {
+  font-size: 12.5px;
   font-weight: 700;
   letter-spacing: 0.03em;
 }
 
-.ticker-detail {
+.spark {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  width: 46px;
+  height: 26px;
   color: var(--muted);
+}
+
+.spark.up {
+  color: var(--buy);
+}
+
+.spark.down {
+  color: var(--sell);
+}
+
+.spark-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.ticker-line {
+  display: flex;
+  gap: 7px;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ticker-price {
+  color: var(--text-2);
+}
+
+.ticker-change,
+.quote-change {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.ticker-change.up,
+.quote-change.up {
+  color: var(--buy);
+}
+
+.ticker-change.down,
+.quote-change.down {
+  color: var(--sell);
 }
 
 .quote {
   display: flex;
-  align-items: baseline;
-  gap: 10px;
+  flex-direction: column;
+  min-width: 112px;
   font-variant-numeric: tabular-nums;
 }
 
 .quote-price {
-  min-width: 92px;
-  font-size: 24px;
+  font-size: 23px;
   font-weight: 700;
   letter-spacing: -0.02em;
+  line-height: 1.15;
 }
 
 .quote-price.up {
@@ -424,27 +472,60 @@ button {
 }
 
 .quote-change {
+  font-size: 12px;
+}
+
+.stats {
+  display: flex;
+  gap: 18px;
+  margin: 0;
+}
+
+.stats div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stats dt {
   color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.stats dd {
+  margin: 0;
   font-size: 12.5px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .session {
   display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 260px;
+}
+
+.session-row {
+  display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .phase {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  height: 24px;
-  padding: 0 10px;
+  height: 22px;
+  padding: 0 9px;
   border-radius: 999px;
   background: var(--buy-soft);
   color: var(--buy);
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
   white-space: nowrap;
@@ -479,10 +560,62 @@ button {
   }
 }
 
+.countdown,
 .clock {
   color: var(--text-2);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.clock {
+  color: var(--muted);
+}
+
+.timeline {
+  display: flex;
+  flex: 1;
+  gap: 3px;
+  height: 6px;
+}
+
+.segment {
+  position: relative;
+  flex: 1.3;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--hover);
+}
+
+.segment.continuous {
+  flex: 6;
+}
+
+.segment.closed {
+  flex: 0.8;
+}
+
+.segment i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0;
+  border-radius: inherit;
+}
+
+.segment.auction i {
+  background: var(--auction);
+}
+
+.segment.continuous i {
+  background: var(--buy);
+}
+
+.segment.closed i {
+  background: var(--muted);
+}
+
+.segment.current {
+  box-shadow: 0 0 0 1px var(--border-strong);
 }
 
 .controls {
@@ -490,6 +623,98 @@ button {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+}
+
+.menu-anchor {
+  position: relative;
+}
+
+.speed-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0 8px 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-raised);
+  font-size: 12.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  transition: border-color 0.15s;
+}
+
+.speed-button:hover,
+.speed-button[aria-expanded="true"] {
+  border-color: var(--border-strong);
+}
+
+.speed-button .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  min-width: 168px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface-raised);
+  box-shadow: 0 20px 44px -16px rgba(0, 0, 0, 0.8);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.menu-item:hover {
+  background: var(--hover);
+}
+
+.menu-item[aria-checked="true"] {
+  color: var(--accent);
+}
+
+.menu-note {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+@media (max-width: 1500px) {
+  .stats .stat-open {
+    display: none;
+  }
+}
+
+@media (max-width: 1360px) {
+  .stats .stat-volume {
+    display: none;
+  }
+}
+
+@media (max-width: 1300px) and (min-width: 861px) {
+  .stats {
+    display: none;
+  }
 }
 
 /* Workspace and panels ------------------------------------------------------------------------------------------- */
@@ -585,6 +810,20 @@ button {
 
 .chart-hint {
   margin-left: auto;
+}
+
+.auction-status {
+  margin-left: auto;
+  overflow: hidden;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--auction-soft);
+  color: var(--auction);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .chart-body canvas {
@@ -833,6 +1072,10 @@ button {
 
 .mid-price.down {
   color: var(--sell);
+}
+
+.mid-price.auction {
+  color: var(--auction);
 }
 
 .mid-note {
@@ -1154,6 +1397,31 @@ button {
     order: -1;
     width: 100%;
     overflow-x: auto;
+  }
+
+  .ticker {
+    grid-template-columns: minmax(0, 1fr);
+    flex: 1;
+  }
+
+  .spark {
+    display: none;
+  }
+
+  .chart-panel .panel-head {
+    flex-wrap: wrap;
+    padding-block: 8px;
+  }
+
+  .auction-status {
+    flex-basis: 100%;
+    margin-left: 0;
+    white-space: normal;
+  }
+
+  .legend-change,
+  .legend-row .ohlc:last-child {
+    display: none;
   }
 
   .controls {

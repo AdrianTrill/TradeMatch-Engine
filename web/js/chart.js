@@ -9,7 +9,7 @@ import { palette } from './palette.js';
 
 const AXIS = 68;  // width of the price axis
 const TIME_AXIS = 24;  // height of the time axis
-const TOP = 60;  // room above the candles for the legend
+const TOP = 66;  // room above the candles for the legend
 const RIGHT_PAD = 3;  // empty slots to the right of the live candle
 const ZOOM = { min: 20, max: 480, initial: 96 };
 const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1_800, 3_600, 7_200, 14_400];
@@ -217,6 +217,21 @@ export class PriceChart {
 
     this.drawCrosses(context, view.crosses, config, firstSlot, lastSlot, length, xOfSlot, y, plot);
 
+    // During a call auction, the price its uncross would trade at now.
+    if (view.auction && this.anchor === null) {
+      const level = crisp(y(view.auction.price));
+      context.setLineDash([6, 4]);
+      context.strokeStyle = palette.auction;
+      context.beginPath();
+      context.moveTo(0, level);
+      context.lineTo(plot, level);
+      context.stroke();
+      context.setLineDash([]);
+      context.font = font(10, 700);
+      context.fillStyle = palette.auction;
+      context.fillText('INDICATIVE UNCROSS', 8, level - 6);
+    }
+
     // The last price, and the price under the pointer, tagged on the axis.
     const last = view.last ?? bars.at(-1)[4];
     const lastBar = bars.at(-1);
@@ -236,6 +251,10 @@ export class PriceChart {
     }
     if (this.show.fair) {
       tags.push({ y: y(view.fair), text: price(view.fair), background: palette.fair, color: palette.surface });
+    }
+    if (view.auction && this.anchor === null) {
+      tags.push({ y: y(view.auction.price), text: price(view.auction.price), background: palette.auction,
+        color: palette.surface });
     }
     const hover = this.hover && !this.drag && this.hover.x < plot && this.hover.y < bottom ? this.hover : null;
     if (hover) {
@@ -353,7 +372,7 @@ export class PriceChart {
         if (label && center - half > labelEnd + 6) {
           context.fillStyle = auction ? palette.auction : palette.muted;
           context.textAlign = 'center';
-          context.fillText(label, center, TOP - 5);
+          context.fillText(label, center, TOP - 6);
           context.textAlign = 'left';
           labelEnd = center + half;
         }
@@ -438,7 +457,9 @@ export class PriceChart {
         context.font = font(10, 650);
         const width = context.measureText(label).width + 10;
         const left = Math.min(plot - width - 2, Math.max(2, x - width / 2));
-        const box = { left, right: left + width, top: top - 25, bottom: top - 10 };
+        // Above the marker, unless that would run into the session labels at the top.
+        const labelTop = top - 25 < TOP ? top + 10 : top - 25;
+        const box = { left, right: left + width, top: labelTop, bottom: labelTop + 15 };
         if (placed.every((other) => box.right + 4 < other.left || box.left - 4 > other.right ||
           box.bottom + 2 < other.top || box.top - 2 > other.bottom)) {
           placed.push(box);
@@ -447,7 +468,7 @@ export class PriceChart {
           context.roundRect(left, box.top, width, 15, 4);
           context.fill();
           context.fillStyle = palette.auction;
-          context.fillText(label, left + 5, top - 14);
+          context.fillText(label, left + 5, box.top + 11);
         }
       }
     }
