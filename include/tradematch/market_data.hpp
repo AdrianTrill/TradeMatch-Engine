@@ -16,8 +16,6 @@
 
 namespace tradematch {
 
-using Timestamp = std::int64_t;  // nanoseconds; the feed is driven by the caller's clock, real or simulated
-
 struct TopOfBook {
     std::optional<Price> bid_price;
     Volume bid_quantity{};

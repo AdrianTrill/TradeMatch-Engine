@@ -37,8 +37,18 @@ jobs:
         run: ./build/tradematch_differential_tests --seeds 2000 --ops 5000
 
   libfuzzer:
-    name: libFuzzer / ASan + UBSan
+    name: libFuzzer / ${{ matrix.corpus }} / ASan + UBSan
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Order flow checked against the reference book, with snapshot round trips.
+          - target: tradematch_fuzzer
+            corpus: order-book
+          # Journal and snapshot decoding, replay, and restore.
+          - target: tradematch_journal_fuzzer
+            corpus: journal
     env:
       # Short smoke runs on every push, a longer nightly campaign, and a configurable manual budget.
       FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1200' || inputs.seconds || '60' }}
@@ -51,8 +61,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: fuzz-corpus
-          key: fuzz-corpus-${{ github.run_id }}
-          restore-keys: fuzz-corpus-
+          key: fuzz-corpus-${{ matrix.corpus }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.corpus }}-
 
       - name: Configure
         run: >
@@ -60,20 +70,20 @@ jobs:
           -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
 
       - name: Build fuzzer
-        run: cmake --build build-fuzz --target tradematch_fuzzer --parallel
+        run: cmake --build build-fuzz --target ${{ matrix.target }} --parallel
 
       - name: Fuzz for ${{ env.FUZZ_SECONDS }} seconds
         run: |
           mkdir -p fuzz-corpus
           echo "Corpus entries before: $(ls fuzz-corpus | wc -l)"
-          ./build-fuzz/tradematch_fuzzer fuzz-corpus -max_total_time="${FUZZ_SECONDS}" -max_len=4096 -print_final_stats=1
+          ./build-fuzz/${{ matrix.target }} fuzz-corpus -max_total_time="${FUZZ_SECONDS}" -max_len=4096 -print_final_stats=1
           echo "Corpus entries after: $(ls fuzz-corpus | wc -l)"
 
       - name: Upload crash reproducers
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: fuzz-crashes
+          name: fuzz-crashes-${{ matrix.corpus }}
           path: |
             crash-*
             leak-*

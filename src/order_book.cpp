@@ -4,8 +4,11 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
+#include <optional>
 #include <ranges>
 #include <stdexcept>
+#include <string>
 
 namespace tradematch {
 
@@ -766,6 +769,261 @@ BookSnapshot OrderBook::snapshot() const {
     collect(bids_, book_snapshot.bids);
     collect(asks_, book_snapshot.asks);
     return book_snapshot;
+}
+
+TRADEMATCH_COLD BookState OrderBook::export_state() const {
+    BookState state;
+    state.phase = phase_;
+    state.last_trade_price = last_trade_price_;
+    state.next_sequence = next_sequence_;
+    state.next_trade_id = next_trade_id_;
+
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        auto& levels = side == Side::Buy ? state.bids : state.asks;
+        levels.reserve(ladder(side).size());
+        for (const LadderEntry& entry : std::views::reverse(ladder(side))) {
+            const PriceLevel& level = levels_[entry.level];
+            PriceLevelState& level_state = levels.emplace_back();
+            level_state.price = level.price;
+            level_state.orders.reserve(level.order_count);
+            for (Slot node_slot = level.head; node_slot != kNone; node_slot = nodes_[node_slot].next) {
+                const OrderNode& node = nodes_[node_slot];
+                level_state.orders.push_back(RestingOrderState{node.order_id,
+                                                               node.sequence,
+                                                               node.remaining,
+                                                               node.hidden,
+                                                               node.display,
+                                                               node.owner,
+                                                               node.time_in_force});
+            }
+        }
+    }
+
+    state.stops.reserve(stop_index_.size());
+    for (const StopLadder* side_stops : {&buy_stops_, &sell_stops_}) {
+        for (const StopEntry& entry : *side_stops) {
+            state.stops.push_back(StopOrderState{stops_[entry.stop].request, entry.sequence});
+        }
+    }
+    std::ranges::sort(state.stops, std::less{}, &StopOrderState::sequence);
+
+    const auto copy_queue = [](const std::vector<AuctionMarketOrder>& queue,
+                               std::vector<AuctionMarketOrderState>& copy) {
+        copy.reserve(queue.size());
+        for (const AuctionMarketOrder& queued : queue) {
+            copy.push_back(AuctionMarketOrderState{queued.order_id, queued.quantity, queued.time_in_force});
+        }
+    };
+    copy_queue(auction_buys_, state.auction_buys);
+    copy_queue(auction_sells_, state.auction_sells);
+    return state;
+}
+
+TRADEMATCH_COLD void OrderBook::import_state(const BookState& state) {
+    validate_state(state);
+
+    std::size_t order_count = 0;
+    for (const auto* levels : {&state.bids, &state.asks}) {
+        for (const PriceLevelState& level : *levels) {
+            order_count += level.orders.size();
+        }
+    }
+    BookCapacity capacity;
+    capacity.orders = std::max(nodes_.capacity(), order_count);
+    capacity.price_levels = std::max({bids_.capacity(), asks_.capacity(), state.bids.size(), state.asks.size()});
+    capacity.trades_per_call = trades_.capacity();
+    capacity.stop_orders = std::max(stops_.capacity(), state.stops.size());
+
+    // Building a separate book first means that even a failed allocation leaves this one untouched.
+    OrderBook rebuilt(capacity);
+    rebuilt.load_state(state);
+    rebuilt.listener_ = listener_;
+    *this = std::move(rebuilt);
+}
+
+namespace {
+
+[[noreturn]] TRADEMATCH_COLD void reject_state(const char* reason) {
+    throw std::invalid_argument(std::string{"invalid book state: "} + reason);
+}
+
+constexpr bool is_valid(Side side) noexcept {
+    return side == Side::Buy || side == Side::Sell;
+}
+
+constexpr bool is_valid(TimeInForce time_in_force) noexcept {
+    return static_cast<std::uint8_t>(time_in_force) <= static_cast<std::uint8_t>(TimeInForce::FillOrKill);
+}
+
+constexpr bool is_valid(SelfTradePrevention mode) noexcept {
+    return static_cast<std::uint8_t>(mode) <= static_cast<std::uint8_t>(SelfTradePrevention::CancelBoth);
+}
+
+}  // namespace
+
+// Accepts exactly the states a book can reach, so an imported book upholds every invariant the matching code relies
+// on: sorted ladders without empty levels, FIFO queues in sequence order, unique order IDs and sequence numbers below
+// the next one to be issued, no crossed book outside an auction, and no stop that the last trade should have fired.
+TRADEMATCH_COLD void OrderBook::validate_state(const BookState& state) {
+    if (state.phase != TradingPhase::Continuous && state.phase != TradingPhase::Auction) {
+        reject_state("unknown trading phase");
+    }
+    if (state.next_sequence == 0U || state.next_trade_id == 0U) {
+        reject_state("sequence and trade ID counters start at 1");
+    }
+    if (state.last_trade_price && *state.last_trade_price <= 0) {
+        reject_state("the last trade price must be positive");
+    }
+
+    std::vector<OrderId> order_ids;
+    std::vector<SequenceNumber> sequences;
+    const auto use_ids = [&](OrderId order_id, std::optional<SequenceNumber> sequence) {
+        if (order_id == 0U) {
+            reject_state("order ID 0 is reserved");
+        }
+        order_ids.push_back(order_id);
+        if (sequence) {
+            if (*sequence == 0U || *sequence >= state.next_sequence) {
+                reject_state("sequence numbers must be below next_sequence");
+            }
+            sequences.push_back(*sequence);
+        }
+    };
+
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        const auto& levels = side == Side::Buy ? state.bids : state.asks;
+        for (std::size_t index = 0; index < levels.size(); ++index) {
+            const PriceLevelState& level = levels[index];
+            if (level.price <= 0) {
+                reject_state("level prices must be positive");
+            }
+            if (index > 0) {
+                const Price better = levels[index - 1].price;
+                if (side == Side::Buy ? level.price >= better : level.price <= better) {
+                    reject_state("levels must be unique and sorted from the best price");
+                }
+            }
+            if (level.orders.empty()) {
+                reject_state("price levels cannot be empty");
+            }
+            SequenceNumber previous = 0;
+            for (const RestingOrderState& order : level.orders) {
+                use_ids(order.order_id, order.sequence);
+                if (order.sequence <= previous) {
+                    reject_state("orders in a level must be in time priority, which is ascending sequence");
+                }
+                previous = order.sequence;
+                if (order.visible_quantity == 0U || !can_rest(order.time_in_force)) {
+                    reject_state("resting orders need a visible quantity and a GTC or DAY time in force");
+                }
+                if (order.display_quantity == 0U ? order.hidden_quantity != 0U
+                                                 : order.visible_quantity > order.display_quantity) {
+                    reject_state("only icebergs have a hidden reserve, and they show at most one tranche");
+                }
+                if (Volume{order.visible_quantity} + order.hidden_quantity > std::numeric_limits<Quantity>::max()) {
+                    reject_state("an order's open quantity must fit in a Quantity");
+                }
+            }
+        }
+    }
+    if (state.phase == TradingPhase::Continuous && !state.bids.empty() && !state.asks.empty() &&
+        state.bids.front().price >= state.asks.front().price) {
+        reject_state("a book in continuous trading cannot be crossed");
+    }
+
+    SequenceNumber previous_stop = 0;
+    for (const StopOrderState& stop : state.stops) {
+        const OrderRequest& request = stop.request;
+        use_ids(request.order_id, stop.sequence);
+        if (stop.sequence <= previous_stop) {
+            reject_state("pending stops must be in arrival order");
+        }
+        previous_stop = stop.sequence;
+        if (!is_valid(request.side) || !is_stop(request.type) || !is_valid(request.time_in_force) ||
+            !is_valid(request.self_trade_prevention) || request.quantity == 0U ||
+            (request.type == OrderType::StopLimit ? request.price <= 0 : request.price != 0) ||
+            validate_advanced(request).reason != RejectReason::None) {
+            reject_state("pending stops must be valid stop or stop-limit orders");
+        }
+        if (const auto last = state.last_trade_price;
+            last && (request.side == Side::Buy ? *last >= request.stop_price : *last <= request.stop_price)) {
+            reject_state("a pending stop cannot already be triggered by the last trade price");
+        }
+    }
+
+    for (const auto* queue : {&state.auction_buys, &state.auction_sells}) {
+        if (!queue->empty() && state.phase != TradingPhase::Auction) {
+            reject_state("market orders only queue for an uncross during a call auction");
+        }
+        for (const AuctionMarketOrderState& queued : *queue) {
+            use_ids(queued.order_id, std::nullopt);
+            if (queued.quantity == 0U || !can_rest(queued.time_in_force)) {
+                reject_state("queued auction market orders need a quantity and a GTC or DAY time in force");
+            }
+        }
+    }
+
+    std::ranges::sort(order_ids);
+    if (std::ranges::adjacent_find(order_ids) != order_ids.end()) {
+        reject_state("order IDs must be unique");
+    }
+    std::ranges::sort(sequences);
+    if (std::ranges::adjacent_find(sequences) != sequences.end()) {
+        reject_state("sequence numbers must be unique");
+    }
+}
+
+// Fills a freshly constructed book from a validated state.
+TRADEMATCH_COLD void OrderBook::load_state(const BookState& state) {
+    phase_ = state.phase;
+    last_trade_price_ = state.last_trade_price;
+    next_sequence_ = state.next_sequence;
+    next_trade_id_ = state.next_trade_id;
+
+    for (const Side side : {Side::Buy, Side::Sell}) {
+        Ladder& side_ladder = ladder(side);
+        // Ladders keep the best price at the back, so levels are added from the worst price inwards.
+        for (const PriceLevelState& level_state : std::views::reverse(side == Side::Buy ? state.bids : state.asks)) {
+            const Slot level_slot = allocate_level();
+            levels_[level_slot] = PriceLevel{level_state.price, 0U, 0U, kNone, kNone, 0U, side};
+            side_ladder.push_back(LadderEntry{level_state.price, level_slot});
+            for (const RestingOrderState& order : level_state.orders) {
+                const Slot node_slot = allocate_node();
+                PriceLevel& level = levels_[level_slot];
+                nodes_[node_slot] = OrderNode{order.order_id,
+                                              order.sequence,
+                                              order.visible_quantity,
+                                              order.hidden_quantity,
+                                              order.display_quantity,
+                                              order.owner,
+                                              level_slot,
+                                              level.tail,
+                                              kNone,
+                                              side,
+                                              order.time_in_force};
+                if (level.tail != kNone) {
+                    nodes_[level.tail].next = node_slot;
+                } else {
+                    level.head = node_slot;
+                }
+                level.tail = node_slot;
+                ++level.order_count;
+                level.total_quantity += order.visible_quantity;
+                level.hidden_quantity += order.hidden_quantity;
+                index_.insert(order.order_id, node_slot);
+            }
+        }
+    }
+
+    for (const StopOrderState& stop : state.stops) {
+        add_stop(stop.request, stop.sequence);
+    }
+    for (const AuctionMarketOrderState& queued : state.auction_buys) {
+        auction_buys_.push_back(AuctionMarketOrder{queued.order_id, queued.quantity, queued.time_in_force});
+    }
+    for (const AuctionMarketOrderState& queued : state.auction_sells) {
+        auction_sells_.push_back(AuctionMarketOrder{queued.order_id, queued.quantity, queued.time_in_force});
+    }
 }
 
 bool OrderBook::would_cross(const OrderRequest& order) const noexcept {

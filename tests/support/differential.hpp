@@ -2,6 +2,7 @@
 #define TRADEMATCH_TESTS_DIFFERENTIAL_HPP
 
 #include "support/reference_book.hpp"
+#include "tradematch/detail/codec.hpp"
 #include "tradematch/order_book.hpp"
 
 #include <algorithm>
@@ -21,7 +22,8 @@ enum class OpKind : std::uint8_t {
     Replace,
     ExpireDay,
     BeginAuction,
-    Uncross
+    Uncross,
+    Snapshot  // replace the engine with a book restored from a binary snapshot of its state
 };
 
 struct Operation {
@@ -51,6 +53,8 @@ inline std::string describe(const Operation& op) {
             return "BEGIN_AUCTION";
         case OpKind::Uncross:
             return "UNCROSS";
+        case OpKind::Snapshot:
+            return "SNAPSHOT_RESTORE";
     }
     out << "id=" << op.order.order_id << ' ' << to_string(op.order.side) << ' ' << to_string(op.order.type)
         << " qty=" << op.order.quantity << " price=" << op.order.price << ' ' << to_string(op.order.time_in_force)
@@ -65,7 +69,7 @@ inline std::string describe(const Operation& op) {
 class DifferentialHarness {
 public:
     DifferentialHarness() = default;
-    explicit DifferentialHarness(const BookCapacity& capacity) : engine_(capacity) {}
+    explicit DifferentialHarness(const BookCapacity& capacity) : capacity_(capacity), engine_(capacity) {}
 
     struct Stats {
         std::size_t operations{0};
@@ -79,6 +83,7 @@ public:
         std::size_t self_trade_cancels{0};
         std::size_t auctions{0};
         std::size_t auction_trades{0};
+        std::size_t snapshots{0};
         std::size_t max_resting_orders{0};
     };
 
@@ -130,6 +135,10 @@ public:
                 stats_.auction_trades += result.executed ? result.trades.size() : 0U;
                 break;
             }
+            case OpKind::Snapshot:
+                mismatch = restore_from_snapshot();
+                ++stats_.snapshots;
+                break;
         }
 
         if (mismatch.empty()) {
@@ -149,6 +158,28 @@ public:
     }
 
 private:
+    // Round-trips the engine's state through the binary snapshot encoding into a brand-new book, which then replaces
+    // the engine. The reference keeps running untouched, so any state a snapshot fails to capture shows up as a later
+    // mismatch.
+    std::string restore_from_snapshot() {
+        const BookState state = engine_.export_state();
+        std::vector<std::uint8_t> bytes;
+        detail::ByteWriter out(bytes);
+        detail::encode_book_state(out, state);
+        detail::ByteReader in(bytes);
+        const BookState decoded = detail::decode_book_state(in);
+        if (!(decoded == state) || in.remaining() != 0U) {
+            return "the snapshot encoding did not round-trip the book state";
+        }
+        OrderBook restored(capacity_);
+        restored.import_state(decoded);
+        if (!(restored.export_state() == state)) {
+            return "the restored book exports a different state";
+        }
+        engine_ = std::move(restored);
+        return {};
+    }
+
     template <typename T>
     static std::string field(const char* name, const T& engine, const T& reference) {
         std::ostringstream out;
@@ -389,6 +420,7 @@ private:
         return {};
     }
 
+    BookCapacity capacity_;
     OrderBook engine_;
     ReferenceBook reference_;
     Stats stats_;
@@ -648,7 +680,10 @@ private:
         if (selector < 253) {
             return OpKind::ExpireDay;
         }
-        return selector == 253 ? OpKind::BeginAuction : OpKind::Uncross;
+        if (selector == 253) {
+            return OpKind::BeginAuction;
+        }
+        return selector == 254 ? OpKind::Uncross : OpKind::Snapshot;
     }
 
     std::uint8_t byte() noexcept {

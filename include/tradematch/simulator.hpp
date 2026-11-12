@@ -1,6 +1,7 @@
 #ifndef TRADEMATCH_SIMULATOR_HPP
 #define TRADEMATCH_SIMULATOR_HPP
 
+#include "tradematch/journal.hpp"
 #include "tradematch/latency_histogram.hpp"
 #include "tradematch/market_data.hpp"
 #include "tradematch/matching_engine.hpp"
@@ -9,6 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <optional>
@@ -58,10 +60,11 @@ struct SimulationStats {
 // auction, continuous trading, a closing call auction, and day-order expiry. Market makers quote several levels per
 // side, noise traders post and cancel passive orders and send marketable ones, momentum traders chase trends, and a
 // "whale" works large icebergs and stop orders. Everything is driven by one seeded random generator and simulated
-// time, so a given configuration replays identically.
+// time, so a given configuration replays identically. With a journal, every engine command is recorded, and
+// replaying the journal rebuilds the exact same books.
 class MarketSimulator {
 public:
-    explicit MarketSimulator(SimulationConfig config = {});
+    explicit MarketSimulator(SimulationConfig config = {}, JournalWriter* journal = nullptr);
     MarketSimulator(const MarketSimulator&) = delete;
     MarketSimulator& operator=(const MarketSimulator&) = delete;
     MarketSimulator(MarketSimulator&&) = delete;
@@ -90,6 +93,11 @@ public:
 
     const MatchingEngine& engine() const noexcept {
         return engine_;
+    }
+
+    // Flushes the journal and writes a snapshot of the engine; see JournaledEngine::save_snapshot().
+    std::uint64_t save_snapshot(const std::filesystem::path& path) {
+        return journaled_.save_snapshot(path);
     }
 
     const MarketDataFeed& feed() const noexcept {
@@ -145,6 +153,7 @@ private:
     SimulationConfig config_;
     std::mt19937_64 rng_;
     MatchingEngine engine_;
+    JournaledEngine journaled_;  // every state change goes through here, so it can be journaled
     std::unique_ptr<MarketDataFeed> feed_;
     std::unique_ptr<LatencyHistogram> latency_;
     std::vector<Instrument> symbols_;

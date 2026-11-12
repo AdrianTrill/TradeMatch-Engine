@@ -44,6 +44,8 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - Market data: L2 depth updates, top of book, trade tape, OHLCV candles, VWAP, and a gap-free sequenced feed
 - Machine-readable reject reasons for every rejected request
 - Zero heap allocations on the request path once capacity is reserved
+- A write-ahead journal of every command: CRC-32C-checked, about 20 bytes per order, and safe against torn writes
+- Atomic snapshots, recovery from a snapshot plus the journal tail, and a 64-bit hash of the complete book state
 - An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
 - Deterministic benchmark/demo scenarios
 
@@ -201,26 +203,36 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   └── tui.gif
 ├── include/tradematch/
 │   ├── book_listener.hpp
+│   ├── book_state.hpp
 │   ├── detail/
+│   │   ├── codec.hpp
 │   │   ├── config.hpp
+│   │   ├── file_io.hpp
 │   │   └── order_index.hpp
+│   ├── journal.hpp
 │   ├── latency_histogram.hpp
 │   ├── market_data.hpp
 │   ├── matching_engine.hpp
 │   ├── order_book.hpp
 │   ├── simulator.hpp
+│   ├── snapshot.hpp
 │   └── types.hpp
 ├── src/
+│   ├── codec.cpp
+│   ├── file_io.cpp
 │   ├── formatting.cpp
+│   ├── journal.cpp
 │   ├── market_data.cpp
 │   ├── matching_engine.cpp
 │   ├── order_book.cpp
-│   └── simulator.cpp
+│   ├── simulator.cpp
+│   └── snapshot.cpp
 ├── bench/
 │   ├── baseline/
 │   │   ├── map_order_book.cpp
 │   │   └── map_order_book.hpp
 │   ├── benchmark_main.cpp
+│   ├── journaled_book.hpp
 │   ├── system_info.hpp
 │   ├── workload.cpp
 │   └── workload.hpp
@@ -228,6 +240,7 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │   ├── allocation_tests.cpp
 │   ├── bench_tests.cpp
 │   ├── differential_tests.cpp
+│   ├── journal_tests.cpp
 │   ├── market_data_tests.cpp
 │   ├── order_book_tests.cpp
 │   ├── order_index_tests.cpp
@@ -236,10 +249,14 @@ Cancel is O(1): an index lookup, then unlinking the node from its level. Only wh
 │       ├── differential.hpp
 │       └── reference_book.hpp
 ├── fuzz/
+│   ├── journal_fuzzer.cpp
 │   ├── order_book_fuzzer.cpp
 │   └── standalone_main.cpp
+├── cmake/
+│   └── replay_roundtrip.cmake
 └── tools/
     ├── demo_main.cpp
+    ├── replay_main.cpp
     └── tui_main.cpp
 ```
 
@@ -294,11 +311,12 @@ Demo:
 ./build/tradematch_demo
 ```
 
-Live market simulator (see [Live Market Simulator](#live-market-simulator)):
+Live market simulator (see [Live Market Simulator](#live-market-simulator)) and journal replay (see [Journal, Snapshots, and Replay](#journal-snapshots-and-replay)):
 
 ```bash
 make tui                                  # or ./build/tradematch_tui after a CMake build
 ./build/tradematch_tui --seed 42 --speed 4
+make replay-demo                          # record a session's journal, replay it, and compare state hashes
 ```
 
 Benchmark (see [Performance](#performance)):
@@ -345,6 +363,7 @@ A seed always replays the same market, on every platform. The standard library's
 | `--fps X` | `15` | Frames per second |
 | `--frames N` | `0` | Stop after N frames; 0 runs until Ctrl+C |
 | `--record FILE.cast` | | Also write an [asciinema](https://asciinema.org) v2 recording |
+| `--journal FILE` | | Journal every command, for [replay](#journal-snapshots-and-replay) |
 | `--no-sleep` | | Render frames as fast as possible. Recordings keep their real-time pacing |
 | `--headless` | | Don't draw, for recordings and the CTest smoke test |
 
@@ -354,6 +373,68 @@ To record a GIF like the one above with [agg](https://github.com/asciinema/agg):
 ./build/tradematch_tui --seed 7 --speed 2.5 --fps 12 --frames 330 --no-sleep --headless --record tui.cast
 agg --font-size 14 --theme monokai --last-frame-duration 3 tui.cast tui.gif
 ```
+
+`--journal FILE` records every command the session sends to the engine; see the next section.
+
+## Journal, Snapshots, and Replay
+
+The engine is deterministic: the same commands in the same order always produce the same trades and the same books. That makes event sourcing natural. `JournaledEngine` appends every state-changing command to a journal before applying it, and replaying the journal into an empty engine rebuilds exactly the same state. Rejected requests are journaled too, since replay rejects them in the same way.
+
+```cpp
+tradematch::MatchingEngine engine;
+tradematch::JournalWriter journal("orders.tmj");  // creates the journal, or resumes an existing one
+tradematch::JournaledEngine exchange(engine, &journal);
+
+const auto acme = exchange.add_symbol("ACME");
+exchange.set_time(now_ns);
+exchange.submit(acme, {1, tradematch::Side::Buy, tradematch::OrderType::Limit, 100, 10050});
+exchange.save_snapshot("orders.snapshot");  // optional: bounds recovery time
+
+// After a restart: load the snapshot, then replay only the journal records after it.
+tradematch::MatchingEngine recovered;
+tradematch::recover(recovered, "orders.tmj", "orders.snapshot");
+```
+
+**Journal format.** A 24-byte header (magic, format version, first sequence number, and a CRC-32C) is followed by records: a 4-byte payload length, a CRC-32C of the payload, and the payload. A payload holds the command type, the timestamp as a zigzag varint delta from the previous record, and the command's fields as LEB128 varints. An order's side, type, time in force, post-only flag, and self-trade prevention mode share a single byte. A typical order takes 19 to 22 bytes, framing included. CRC-32C uses the CPU's CRC instructions where the build targets them (ARMv8, or x86 with SSE4.2) and a slice-by-8 table otherwise.
+
+**Durability.** Appends never touch the heap. Each mode trades latency for what survives a crash:
+
+| Mode | Records reach the operating system | Survives | Cost per request (Apple M4) |
+| --- | --- | --- | --- |
+| `Buffered` (default) | in 64 KiB batches | a clean shutdown; a crash loses the latest batch | about 14 ns |
+| `Flush` | one `write` per record | a process crash | about 1.1 µs |
+| `Sync` | one write per record, forced to stable storage (`F_FULLFSYNC` on macOS, `fsync` on Linux, `_commit` on Windows) | power loss | a drive cache flush, typically milliseconds |
+
+**Crash recovery.** A crash in the middle of an append can only damage the end of the journal: it leaves a cut-off record, a final record whose payload never fully reached the disk, or zero-filled space. The reader treats exactly these as a torn tail and stops before it, and reopening the journal cuts the tail off, so appending continues the sequence cleanly. Damage anywhere else is corruption: the reader throws `JournalError` with the record number and byte offset rather than silently dropping every record after it.
+
+**Snapshots.** `OrderBook::export_state()` returns a `BookState`: every resting order in queue order with its sequence number and iceberg reserve, the pending stops, the market orders queued for an auction, the trading phase, the last trade price, and the sequence and trade ID counters. That is everything that decides the book's future behavior, and nothing about how it is stored. `import_state()` rebuilds a book from a state, but only after checking that a book could actually reach it: sorted levels with none empty, queues in time priority, unique order IDs and sequence numbers below the next one to be issued, no crossed book outside an auction, and no stop that the last trade should already have fired. Otherwise it throws and leaves the book untouched.
+
+A snapshot file holds every book's state and the journal sequence number it covers, protected by a CRC-32C. It is written to a temporary file, forced to disk, and renamed over the previous snapshot, so a crash leaves either the old snapshot or the new one, never a mix. `JournaledEngine::save_snapshot()` syncs the journal first. Otherwise a crash could leave a journal that ends before its snapshot, and new appends would reuse sequence numbers the snapshot already includes.
+
+**State hash.** `state_hash()` fingerprints the canonical encoding of the complete state with 64-bit FNV-1a. Engines with equal hashes will behave identically from then on, which turns "did the replay work?" into a single comparison.
+
+**Replay tool.** `tradematch_replay` rebuilds an engine from a journal, optionally starting from a snapshot. It verifies every record, then prints the replay speed, the command mix, the state hash, and each book:
+
+```text
+$ ./build/tradematch_tui --seed 5 --frames 300 --speed 8 --no-sleep --headless --journal session.tmj
+simulated 02:42.000 over 2 day(s): 70,005 requests, 6,339 trades, 3 auctions
+journal session.tmj: 70,013 commands, 1,543,445 bytes
+state hash 0x280caf02de4bec9d
+
+$ ./build/tradematch_replay session.tmj --depth 3 --expect-hash 0x280caf02de4bec9d
+journal     session.tmj  1,543,445 bytes, records 1..70,013
+replayed    70,013 commands in 3.8 ms  (18.59M commands/s)
+            ADD_SYMBOL 1  SUBMIT 9,798  CANCEL 1,563  REPLACE 58,644  BEGIN_AUCTION 3  UNCROSS 3  EXPIRE_DAY_ORDERS 1
+trades      6,339
+state hash  0x280caf02de4bec9d
+  ACME     CONTINUOUS  last 100.09  resting 665  stops 3
+           bid 100.08 x 5,800 (18)       ask 100.09 x 2,100 (4)
+               100.07 x 5,600 (21)           100.10 x 3,200 (12)
+               100.06 x 6,000 (22)           100.11 x 3,200 (10)
+verified    the replayed state matches the expected hash
+```
+
+`make replay-demo` runs exactly this, and CTest runs it on every CI platform. `--snapshot FILE` starts from a snapshot, `--save-snapshot FILE` writes one, and `--expect-hash` fails unless the replayed state matches.
 
 ## Example Workflow
 
@@ -440,7 +521,7 @@ The market data suite ([tests/market_data_tests.cpp](tests/market_data_tests.cpp
 
 Two more suites target the v2 internals:
 
-- **Zero-allocation proof** ([tests/allocation_tests.cpp](tests/allocation_tests.cpp)): replaces global `operator new` to count every heap allocation, replays the benchmark's 1,000,000-operation stream after warm-up, and fails if the engine allocates even once. The v1 baseline is counted on the same stream for comparison: 1.83 million allocations, against 0 for v2.
+- **Zero-allocation proof** ([tests/allocation_tests.cpp](tests/allocation_tests.cpp)): replaces global `operator new` to count every heap allocation, replays the benchmark's 1,000,000-operation stream after warm-up, and fails if the engine allocates even once, with or without a write-ahead journal. The v1 baseline is counted on the same stream for comparison: 1.83 million allocations, against 0 for v2.
 - **Order index** ([tests/order_index_tests.cpp](tests/order_index_tests.cpp)): 300,000 random inserts and erases over a small key space, checked against `std::unordered_map`. The small key space forces long probe runs, wrap-around, and constant backward-shift deletions. Further cases cover growth, reserved capacity, and the reserved key 0.
 
 The differential test also starts every other seed with a book sized for a single order, level, and trade, so the pools and the index grow constantly while being checked.
@@ -456,12 +537,25 @@ The simulator suite ([tests/simulator_tests.cpp](tests/simulator_tests.cpp)) run
 
 CTest also runs the terminal UI headless for 60 frames as a smoke test.
 
+The journal suite ([tests/journal_tests.cpp](tests/journal_tests.cpp)) covers persistence end to end:
+
+- CRC-32C against the RFC 3720 test vectors, with the hardware and portable versions agreeing on every length and alignment, and varints at every boundary up to 64 bits, including rejection of truncated and overlong encodings
+- every command type round-tripping with extreme values and timestamps that jump backwards, journals that start at any sequence number, and reopening a journal to append
+- a final record cut at every byte, a final record that fails its checksum, and zero-filled space after the records all read as a torn tail, and reopening cuts the tail off; damage before the end, a damaged header, and a forged record with a valid checksum are reported as errors, and a writer refuses to append to a corrupt journal
+- when each durability mode puts records in the file, and rejected input (overlong names, out-of-range enums, auctions for unknown symbols) leaving no trace in the journal
+- a two-symbol simulated session over two trading days, replayed into a fresh engine with an identical state hash and identical books; recovery from a mid-session snapshot plus the journal tail, and from the journal alone; and refusal to recover when the journal and snapshot leave a gap
+- every single-byte corruption and every truncation of a snapshot file being detected
+- 25 kinds of impossible state rejected by `import_state()` without changing the book, while reachable states, including a crossed book with queued market orders during an auction, import and export unchanged
+- state hashes that ignore pool capacities but reflect queue order, the next sequence number, and symbol names
+
+CTest also records a session with `tradematch_tui --journal`, replays it with `tradematch_replay`, and requires the same state hash.
+
 ## Differential Testing and Fuzzing
 
 Hand-written scenarios only cover the cases someone thought of. To catch the rest, the engine is checked against a second, deliberately naive implementation ([tests/support/reference_book.hpp](tests/support/reference_book.hpp)). The reference keeps every resting order in one flat vector and finds the best match with a linear scan, so it is slow but easy to verify by reading.
 
-- **Randomized differential test** (`tradematch_differential_tests`): runs 400,000 adversarial operations (200 seeds x 2,000) through both books. The flow uses a narrow price band so orders constantly cross, small sizes so partial fills are common, and a steady stream of invalid, duplicate, and unknown-ID requests. After every operation it compares result flags, quantities, every trade field, the full depth snapshot including FIFO order IDs, and order lookups. A failure prints the seed, the diverging operation, and a one-line reproduction command.
-- **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow and aborts on the first engine/reference mismatch. CI fuzzes it for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps the target compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
+- **Randomized differential test** (`tradematch_differential_tests`): runs 400,000 adversarial operations (200 seeds x 2,000) through both books. The flow uses a narrow price band so orders constantly cross, small sizes so partial fills are common, and a steady stream of invalid, duplicate, and unknown-ID requests. After every operation it compares result flags, quantities, every trade field, the full depth snapshot including FIFO order IDs, and order lookups. Every 89 operations, the engine is also replaced by a brand-new book restored from a binary snapshot of its own state, while the reference carries on untouched, so any state a snapshot fails to capture shows up as a later mismatch. A failure prints the seed, the diverging operation, and a one-line reproduction command.
+- **Coverage-guided fuzzing** ([fuzz/order_book_fuzzer.cpp](fuzz/order_book_fuzzer.cpp)): a libFuzzer target decodes raw bytes into order flow, including snapshot restores, and aborts on the first engine/reference mismatch. A second target ([fuzz/journal_fuzzer.cpp](fuzz/journal_fuzzer.cpp)) feeds arbitrary bytes to everything that reads persisted data: raw journal files, fuzzed commands framed with valid checksums and replayed into an engine, and fuzzed snapshot contents restored into one. Malformed input must be rejected cleanly, and anything accepted must round-trip exactly. CI fuzzes both for 60 seconds under AddressSanitizer and UndefinedBehaviorSanitizer and also runs a 10-million-operation differential soak. A standalone driver keeps the targets compiling and smoke-tested on toolchains without libFuzzer, such as Apple clang and MSVC.
 
 The random flow covers call auctions (opened about every 150 operations and uncrossed about 30 later), every time-in-force and post-only combination, stop and stop-limit orders around the trading band, icebergs, and orders from a small pool of owners with random self-trade prevention modes. The reference book shares none of the engine's algorithms. For example, its FOK check simply runs the real match on a throwaway copy of the whole book, which checks the engine's single-pass FOK walk against the real matching path. During call phases, the indicative auction price and volumes are compared after every operation, and the engine's two-pointer equilibrium search is checked against a full scan of the book at every candidate price. Half of all replacements target an order's current price with the same or a smaller size, to exercise in-place amends, and end-of-day expiries are interleaved, with the expired ID lists compared.
 
@@ -482,11 +576,12 @@ The harness has been checked by mutation testing. Each injected bug was caught w
 - a buy stop that triggers only strictly above its stop price
 - an iceberg amend that shrinks the displayed part before the reserve
 - an auction that skips the minimum-surplus rule, inverts market pressure, leaves iceberg reserves out of its volume, gives market orders no priority, or accepts IOC orders during the call phase
+- a snapshot that drops the next sequence number, the next trade ID, the last trade price, the trading phase, pending stops, or queued auction orders, or that loses iceberg reserves, owners, or DAY time in force
 
 Two rules are too rare in random flow to rely on it: cross-side stop ordering, which can only arise on a book's first trade, and the auction's lower-price tie-break, which needs two candidates exactly equidistant from the reference price. Dedicated unit tests pin both.
 
 ```bash
-make test        # unit tests + 400k-operation differential test + fuzz smoke test
+make test        # unit tests, 400k-operation differential test, fuzz smoke tests, and the journal replay demo
 make fuzz-long   # 10M-operation soak: 2,000 seeds x 5,000 operations
 
 # Reproduce a reported failure
@@ -494,8 +589,9 @@ make fuzz-long   # 10M-operation soak: 2,000 seeds x 5,000 operations
 
 # Coverage-guided fuzzing (LLVM clang on Linux)
 cmake -S . -B build-fuzz -DCMAKE_CXX_COMPILER=clang++ -DTRADEMATCH_LIBFUZZER=ON -DBUILD_TESTING=OFF
-cmake --build build-fuzz --target tradematch_fuzzer
+cmake --build build-fuzz --target tradematch_fuzzer tradematch_journal_fuzzer
 ./build-fuzz/tradematch_fuzzer -max_total_time=60
+./build-fuzz/tradematch_journal_fuzzer -max_total_time=60
 ```
 
 ## Performance
@@ -534,6 +630,28 @@ Notes for reading the numbers:
 - Every sample includes one clock read, about 12 ns, which flatters neither engine.
 - p99.9 and below are stable across runs. The maximum mostly reflects operating-system noise (interrupts and preemption) on a desktop machine.
 
+### Journaling
+
+`--journal FILE` runs v2 behind the [write-ahead journal](#journal-snapshots-and-replay): every request is encoded, checksummed, and buffered before the book applies it. On the same machine and stream (median of 5 runs, buffered mode):
+
+| metric | v2 | v2 + journal |
+| --- | ---: | ---: |
+| throughput | 49.7 M ops/s | 31.2 M ops/s |
+| mean latency | 21.0 ns | 34.9 ns |
+| p99 | 42 ns | 84 ns |
+| p99.9 | 125 ns | 166 ns |
+| p99.99 | 250 ns | 7.0 us |
+| journal size | | 19.3 bytes per request |
+| heap allocations per operation | 0 | 0 |
+
+Journaling adds about 14 ns per request, most of it varint encoding; the CRC-32C takes about 1.5 ns on the CPU's CRC instructions. The rest is the amortized cost of writing 64 KiB batches. That write lands on the one request in roughly 3,400 that fills the buffer, which is what moves p99.99 to about 7 us; handing batches to a separate I/O thread would take it off the matching path. Replaying a journal runs at about 20 million commands per second, so a million requests rebuild their book in about 50 ms.
+
+```bash
+./build/tradematch_benchmark --engine v2 --journal bench.tmj                       # buffered (default)
+./build/tradematch_benchmark --engine v2 --journal bench.tmj --durability flush --ops 100000
+./build/tradematch_replay bench.tmj                                                # rebuild the final book
+```
+
 ## Continuous Integration
 
 Every push runs two workflows:
@@ -544,17 +662,20 @@ Every push runs two workflows:
 | CI | Sanitizers | Every test under AddressSanitizer (with leak detection) and UndefinedBehaviorSanitizer |
 | CI | Format | `clang-format --dry-run --Werror` on every source file |
 | CI | Lint | `clang-tidy` with the bugprone, performance, modernize, readability, and clang-analyzer families as errors |
-| CI | Smoke tests | `tradematch_benchmark` runs a short workload and `tradematch_tui` renders 60 frames headless, under CTest on every platform |
+| CI | Smoke tests | `tradematch_benchmark` runs a short workload, `tradematch_tui` renders 60 frames headless, and a journaled session replays to the same state hash, under CTest on every platform |
 | CI | Coverage | Engine line coverage must stay at or above 95% (currently 98% of lines and 96% of branches); the HTML report is uploaded as an artifact and the summary appears on the run page |
 | Fuzz | Differential soak | 10 million random operations compared against the reference book |
-| Fuzz | libFuzzer | Coverage-guided fuzzing under ASan + UBSan: 60 seconds per push and 20 minutes nightly. The corpus is cached between runs, so coverage keeps growing |
+| Fuzz | libFuzzer | Two targets, order flow and journal/snapshot decoding, fuzzed under ASan + UBSan: 60 seconds per push and 20 minutes nightly. Each corpus is cached between runs, so coverage keeps growing |
 
 ## Why This Project Matters
 
 For internship, new grad, and backend/systems roles, this repo demonstrates more than syntax. It shows the ability to take a compact but failure-prone codebase and turn it into a cleaner, testable engine with explicit trade-offs, measurable behavior, and documentation that matches reality.
 
-It is also a strong stepping stone for deeper systems work: market data fan-out, persistence, or a lock-aware ingress layer around the matching core.
+It is also a strong stepping stone for deeper systems work: a lock-free ingress pipeline around the matching core, network gateways, or replaying real exchange feeds.
 
 ## Future Improvements
 
-- Snapshot serialization and replayable input streams
+- A multi-threaded pipeline: gateway, matcher, and publisher threads connected by lock-free rings, with the journal's disk writes moved off the matching thread
+- An interactive command line and scripted scenarios
+- A FIX gateway and a NASDAQ ITCH replay tool
+- WebAssembly and Python front ends

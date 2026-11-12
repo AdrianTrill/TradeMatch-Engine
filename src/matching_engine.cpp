@@ -17,7 +17,7 @@ SymbolId MatchingEngine::add_symbol(std::string_view name, const BookCapacity& c
         return *existing;
     }
     const auto symbol = static_cast<SymbolId>(instruments_.size());
-    instruments_.push_back(Instrument{std::string{name}, std::make_unique<OrderBook>(capacity), nullptr});
+    instruments_.push_back(Instrument{std::string{name}, capacity, std::make_unique<OrderBook>(capacity), nullptr});
     attach(instruments_.back(), symbol);
     return symbol;
 }
@@ -41,6 +41,10 @@ OrderBook& MatchingEngine::book(SymbolId symbol) {
 
 const OrderBook& MatchingEngine::book(SymbolId symbol) const {
     return *instruments_.at(symbol).book;
+}
+
+const BookCapacity& MatchingEngine::capacity(SymbolId symbol) const {
+    return instruments_.at(symbol).capacity;
 }
 
 SubmitResult MatchingEngine::submit(SymbolId symbol, const OrderRequest& order) {

@@ -43,10 +43,14 @@ if(TRADEMATCH_COVERAGE)
 endif()
 
 set(TRADEMATCH_ENGINE_SOURCES
+    src/codec.cpp
+    src/file_io.cpp
     src/formatting.cpp
+    src/journal.cpp
     src/market_data.cpp
     src/matching_engine.cpp
     src/order_book.cpp
+    src/snapshot.cpp
 )
 
 add_library(tradematch_engine ${TRADEMATCH_ENGINE_SOURCES})
@@ -61,6 +65,9 @@ target_compile_options(tradematch_sim PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-
 
 add_executable(tradematch_tui tools/tui_main.cpp)
 target_link_libraries(tradematch_tui PRIVATE tradematch_sim tradematch_project_options)
+
+add_executable(tradematch_replay tools/replay_main.cpp)
+target_link_libraries(tradematch_replay PRIVATE tradematch_engine tradematch_project_options)
 
 add_executable(tradematch_demo tools/demo_main.cpp)
 target_link_libraries(tradematch_demo PRIVATE tradematch_engine tradematch_project_options)
@@ -89,6 +96,16 @@ if(BUILD_TESTING)
     add_test(NAME tradematch_simulator_tests COMMAND tradematch_simulator_tests)
     add_test(NAME tradematch_tui_smoke COMMAND tradematch_tui --frames 60 --speed 4 --no-sleep --headless)
 
+    add_executable(tradematch_journal_tests tests/journal_tests.cpp)
+    target_include_directories(tradematch_journal_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+    target_link_libraries(tradematch_journal_tests PRIVATE tradematch_sim tradematch_project_options)
+    add_test(NAME tradematch_journal_tests COMMAND tradematch_journal_tests)
+    # Records a simulated session through the TUI, replays the journal with the replay tool, and checks that both
+    # report the same state hash.
+    add_test(NAME tradematch_replay_roundtrip
+             COMMAND ${CMAKE_COMMAND} -DTUI=$<TARGET_FILE:tradematch_tui> -DREPLAY=$<TARGET_FILE:tradematch_replay>
+                     -DJOURNAL=${CMAKE_CURRENT_BINARY_DIR}/replay_roundtrip.tmj -P ${PROJECT_SOURCE_DIR}/cmake/replay_roundtrip.cmake)
+
     add_executable(tradematch_order_index_tests tests/order_index_tests.cpp)
     target_link_libraries(tradematch_order_index_tests PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_order_index_tests COMMAND tradematch_order_index_tests)
@@ -103,6 +120,10 @@ if(BUILD_TESTING)
     target_include_directories(tradematch_fuzz_standalone PRIVATE ${PROJECT_SOURCE_DIR}/tests)
     target_link_libraries(tradematch_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
     add_test(NAME tradematch_fuzz_smoke COMMAND tradematch_fuzz_standalone --iterations 500)
+
+    add_executable(tradematch_journal_fuzz_standalone fuzz/journal_fuzzer.cpp fuzz/standalone_main.cpp)
+    target_link_libraries(tradematch_journal_fuzz_standalone PRIVATE tradematch_engine tradematch_project_options)
+    add_test(NAME tradematch_journal_fuzz_smoke COMMAND tradematch_journal_fuzz_standalone --iterations 3000)
 
     add_executable(tradematch_bench_tests tests/bench_tests.cpp)
     target_link_libraries(tradematch_bench_tests PRIVATE tradematch_bench_support tradematch_project_options)
@@ -125,9 +146,13 @@ if(TRADEMATCH_LIBFUZZER)
         message(FATAL_ERROR "TRADEMATCH_LIBFUZZER requires clang with libFuzzer support")
     endif()
 
-    # Engine sources are compiled into the fuzzer so libFuzzer receives coverage feedback from the matching code.
-    add_executable(tradematch_fuzzer fuzz/order_book_fuzzer.cpp ${TRADEMATCH_ENGINE_SOURCES})
-    target_include_directories(tradematch_fuzzer PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests)
-    target_compile_options(tradematch_fuzzer PRIVATE -g -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
-    target_link_options(tradematch_fuzzer PRIVATE -fsanitize=fuzzer,address,undefined)
+    # Engine sources are compiled into the fuzzers so libFuzzer receives coverage feedback from the engine code.
+    function(tradematch_add_fuzzer target source)
+        add_executable(${target} ${source} ${TRADEMATCH_ENGINE_SOURCES})
+        target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/tests)
+        target_compile_options(${target} PRIVATE -g -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all)
+        target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+    endfunction()
+    tradematch_add_fuzzer(tradematch_fuzzer fuzz/order_book_fuzzer.cpp)
+    tradematch_add_fuzzer(tradematch_journal_fuzzer fuzz/journal_fuzzer.cpp)
 endif()

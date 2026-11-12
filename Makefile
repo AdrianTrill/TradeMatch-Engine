@@ -5,12 +5,16 @@ DEPFLAGS = -MMD -MP
 BUILD_DIR ?= build
 OBJ_DIR := $(BUILD_DIR)/obj
 
-ENGINE_SRC := src/formatting.cpp src/market_data.cpp src/matching_engine.cpp src/order_book.cpp
+ENGINE_SRC := src/codec.cpp src/file_io.cpp src/formatting.cpp src/journal.cpp src/market_data.cpp \
+	src/matching_engine.cpp src/order_book.cpp src/snapshot.cpp
 ENGINE_OBJ := $(ENGINE_SRC:%.cpp=$(OBJ_DIR)/%.o)
 
 DEMO_BIN := $(BUILD_DIR)/tradematch_demo
 TUI_BIN := $(BUILD_DIR)/tradematch_tui
+REPLAY_BIN := $(BUILD_DIR)/tradematch_replay
 SIM_TEST_BIN := $(BUILD_DIR)/tradematch_simulator_tests
+JOURNAL_TEST_BIN := $(BUILD_DIR)/tradematch_journal_tests
+JOURNAL_FUZZ_BIN := $(BUILD_DIR)/tradematch_journal_fuzz_standalone
 BENCH_BIN := $(BUILD_DIR)/tradematch_benchmark
 TEST_BIN := $(BUILD_DIR)/tradematch_tests
 DIFF_TEST_BIN := $(BUILD_DIR)/tradematch_differential_tests
@@ -37,8 +41,10 @@ endif
 ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tools/demo_main.o \
 	$(OBJ_DIR)/tools/tui_main.o \
+	$(OBJ_DIR)/tools/replay_main.o \
 	$(OBJ_DIR)/src/simulator.o \
 	$(OBJ_DIR)/tests/simulator_tests.o \
+	$(OBJ_DIR)/tests/journal_tests.o \
 	$(OBJ_DIR)/bench/benchmark_main.o \
 	$(OBJ_DIR)/bench/workload.o \
 	$(OBJ_DIR)/bench/baseline/map_order_book.o \
@@ -49,13 +55,14 @@ ALL_OBJ := $(ENGINE_OBJ) \
 	$(OBJ_DIR)/tests/market_data_tests.o \
 	$(OBJ_DIR)/tests/allocation_tests.o \
 	$(OBJ_DIR)/fuzz/order_book_fuzzer.o \
+	$(OBJ_DIR)/fuzz/journal_fuzzer.o \
 	$(OBJ_DIR)/fuzz/standalone_main.o
 
-.PHONY: all test demo tui benchmark fuzz-long format format-check lint sanitize coverage cmake-configure \
-	cmake-build clean
+.PHONY: all test demo tui replay-demo benchmark fuzz-long format format-check lint sanitize coverage \
+	cmake-configure cmake-build clean
 
-all: $(DEMO_BIN) $(TUI_BIN) $(SIM_TEST_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
-	$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
+all: $(DEMO_BIN) $(TUI_BIN) $(REPLAY_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) $(BENCH_BIN) $(TEST_BIN) $(DIFF_TEST_BIN) \
+	$(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) $(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN)
 
 # Each object also emits a .d file listing the headers it includes, so header edits trigger rebuilds.
 $(OBJ_DIR)/%.o: %.cpp
@@ -73,6 +80,12 @@ $(TUI_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tools/tui_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(SIM_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tests/simulator_tests.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(REPLAY_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tools/replay_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(JOURNAL_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/src/simulator.o $(OBJ_DIR)/tests/journal_tests.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(BENCH_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/bench/benchmark_main.o $(OBJ_DIR)/bench/workload.o \
@@ -101,16 +114,28 @@ $(BENCH_TEST_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/tests/bench_tests.o $(OBJ_DIR)/bench
 $(FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/order_book_fuzzer.o $(OBJ_DIR)/fuzz/standalone_main.o
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
-test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) $(ALLOC_TEST_BIN) \
-		$(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN)
+$(JOURNAL_FUZZ_BIN): $(ENGINE_OBJ) $(OBJ_DIR)/fuzz/journal_fuzzer.o $(OBJ_DIR)/fuzz/standalone_main.o
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+test: $(TEST_BIN) $(DIFF_TEST_BIN) $(FUZZ_BIN) $(JOURNAL_FUZZ_BIN) $(BENCH_TEST_BIN) $(INDEX_TEST_BIN) \
+		$(ALLOC_TEST_BIN) $(MARKET_DATA_TEST_BIN) $(SIM_TEST_BIN) $(JOURNAL_TEST_BIN) replay-demo
 	./$(TEST_BIN)
 	./$(SIM_TEST_BIN)
+	./$(JOURNAL_TEST_BIN)
 	./$(MARKET_DATA_TEST_BIN)
 	./$(INDEX_TEST_BIN)
 	./$(ALLOC_TEST_BIN)
 	./$(BENCH_TEST_BIN)
 	./$(DIFF_TEST_BIN)
 	./$(FUZZ_BIN) --iterations 500
+	./$(JOURNAL_FUZZ_BIN) --iterations 3000
+
+# Records a simulated session with the TUI, then replays its journal and checks for the same state hash.
+replay-demo: $(TUI_BIN) $(REPLAY_BIN)
+	./$(TUI_BIN) --seed 5 --frames 300 --speed 8 --no-sleep --headless --journal $(BUILD_DIR)/session.tmj \
+		| tee $(BUILD_DIR)/session.out
+	./$(REPLAY_BIN) $(BUILD_DIR)/session.tmj --depth 3 \
+		--expect-hash $$(sed -n 's/^state hash //p' $(BUILD_DIR)/session.out)
 
 # Longer randomized soak: 2,000 seeds x 5,000 operations against the reference book.
 fuzz-long: $(DIFF_TEST_BIN) $(FUZZ_BIN)

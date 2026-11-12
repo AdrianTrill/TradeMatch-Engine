@@ -1,3 +1,4 @@
+#include "journaled_book.hpp"
 #include "system_info.hpp"
 #include "tradematch/latency_histogram.hpp"
 #include "workload.hpp"
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -43,8 +45,23 @@ struct Options {
     WorkloadConfig workload;
     std::string json_path;
     std::string engine{"both"};
+    std::string journal_path;  // when set, v2 runs behind a write-ahead journal written here
+    std::string durability{"buffered"};
     bool show_distribution{true};
 };
+
+tradematch::Durability parse_durability(const std::string& name) {
+    if (name == "buffered") {
+        return tradematch::Durability::Buffered;
+    }
+    if (name == "flush") {
+        return tradematch::Durability::Flush;
+    }
+    if (name == "sync") {
+        return tradematch::Durability::Sync;
+    }
+    throw std::invalid_argument("--durability must be buffered, flush, or sync");
+}
 
 struct ClockProfile {
     std::uint64_t resolution_ns{0};
@@ -77,7 +94,8 @@ std::uint64_t parse_number(std::string_view flag, const std::string& value) {
 
 void print_usage() {
     std::cout << "usage: tradematch_benchmark [measured_ops] [--ops N] [--warmup N] [--prefill N] [--seed S]\n"
-                 "                            [--engine v1|v2|both] [--json FILE] [--no-distribution]\n";
+                 "                            [--engine v1|v2|both] [--json FILE] [--no-distribution]\n"
+                 "                            [--journal FILE [--durability buffered|flush|sync]]\n";
 }
 
 // Returns false when the program should exit immediately (after --help).
@@ -111,6 +129,11 @@ bool parse_options(int argc, char** argv, Options& options) {
             options.workload.seed = parse_number(arg, value);
         } else if (arg == "--json") {
             options.json_path = value;
+        } else if (arg == "--journal") {
+            options.journal_path = value;
+        } else if (arg == "--durability") {
+            parse_durability(value);
+            options.durability = value;
         } else if (arg == "--engine") {
             if (value != "v1" && value != "v2" && value != "both") {
                 throw std::invalid_argument("--engine must be v1, v2, or both");
@@ -469,11 +492,24 @@ int run(int argc, char** argv) {
         }));
         print_engine(options, *reports.back());
     }
-    if (options.engine != "v1") {
+    if (options.engine != "v1" && options.journal_path.empty()) {
         reports.push_back(measure<tradematch::OrderBook>(workload, kV2Name, [&capacity] {
             return std::make_unique<tradematch::OrderBook>(capacity);
         }));
         print_engine(options, *reports.back());
+    }
+    if (options.engine != "v1" && !options.journal_path.empty()) {
+        using tradematch::bench::JournaledOrderBook;
+        const auto durability = parse_durability(options.durability);
+        const std::string name = std::string{kV2Name} + ", journaling every request (" + options.durability + ")";
+        reports.push_back(measure<JournaledOrderBook>(workload, name, [&] {
+            return std::make_unique<JournaledOrderBook>(capacity, options.journal_path, durability);
+        }));
+        print_engine(options, *reports.back());
+        const auto bytes = std::filesystem::file_size(options.journal_path);
+        std::cout << "  journal    " << options.journal_path << " | " << with_commas(bytes) << " bytes | " << std::fixed
+                  << std::setprecision(1) << static_cast<double>(bytes) / static_cast<double>(workload.commands.size())
+                  << " bytes per request\n";
     }
     if (reports.size() == 2) {
         if (reports.front()->trades != reports.back()->trades ||

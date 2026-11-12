@@ -80,7 +80,9 @@ void test_depth_replica_tracks_the_engine_exactly() {
         book.set_listener(&listener);
 
         for (std::size_t step = 0; step < 2'000; ++step) {
-            const auto op = generator.next(generator_view);
+            // Every so often the book is restored in place from its own state, which must keep the listener attached.
+            const auto op =
+                step % 97 == 96 ? tradematch::testing::Operation{OpKind::Snapshot, {}} : generator.next(generator_view);
             listener.trades.clear();
             std::span<const tradematch::Trade> result_trades;
             switch (op.kind) {
@@ -107,6 +109,9 @@ void test_depth_replica_tracks_the_engine_exactly() {
                 case OpKind::Uncross:
                     result_trades = book.uncross().trades;
                     generator_view.uncross();
+                    break;
+                case OpKind::Snapshot:
+                    book.import_state(book.export_state());
                     break;
             }
             expect(same_trades(result_trades, listener.trades), "Streamed trades should equal the result's trades.");

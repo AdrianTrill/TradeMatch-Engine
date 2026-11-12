@@ -62,9 +62,10 @@ struct MarketSimulator::Agent {
     std::vector<std::vector<OrderId>> quotes;           // market makers: [symbol][side * levels + level]
 };
 
-MarketSimulator::MarketSimulator(SimulationConfig config)
+MarketSimulator::MarketSimulator(SimulationConfig config, JournalWriter* journal)
     : config_(std::move(config)),
       rng_(config_.seed),
+      journaled_(engine_, journal),
       feed_(std::make_unique<MarketDataFeed>(FeedConfig{1'000'000'000, 32, false})),
       latency_(std::make_unique<LatencyHistogram>()) {
     engine_.set_listener(feed_.get());
@@ -74,7 +75,7 @@ MarketSimulator::MarketSimulator(SimulationConfig config)
     capacity.price_levels = 1'024;
     capacity.trades_per_call = 256;
     for (std::size_t index = 0; index < config_.symbols.size(); ++index) {
-        const SymbolId id = engine_.add_symbol(config_.symbols[index], capacity);
+        const SymbolId id = journaled_.add_symbol(config_.symbols[index], capacity);
         const auto start = static_cast<double>(config_.initial_price + static_cast<Price>(index) * 5'000);
         symbols_.push_back(Instrument{id, start, std::nullopt, std::nullopt, start, start});
     }
@@ -142,6 +143,7 @@ void MarketSimulator::run_for(Timestamp duration) {
 void MarketSimulator::step() {
     now_ += config_.step;
     feed_->set_time(now_);
+    journaled_.set_time(now_);
 
     for (auto& instrument : symbols_) {
         instrument.fair += config_.volatility * standard_normal(rng_);
@@ -190,7 +192,7 @@ void MarketSimulator::step() {
 void MarketSimulator::enter_phase(SessionPhase phase) {
     const auto uncross_all = [this] {
         for (auto& instrument : symbols_) {
-            const auto result = engine_.book(instrument.id).uncross();
+            const auto result = journaled_.uncross(instrument.id);
             if (result.executed && phase_ == SessionPhase::Continuous) {
                 instrument.open = result.price;
             }
@@ -201,7 +203,7 @@ void MarketSimulator::enter_phase(SessionPhase phase) {
     };
     const auto begin_auctions = [this] {
         for (const auto& instrument : symbols_) {
-            engine_.book(instrument.id).begin_auction();
+            journaled_.begin_auction(instrument.id);
         }
     };
 
@@ -228,7 +230,7 @@ void MarketSimulator::enter_phase(SessionPhase phase) {
             for (auto& instrument : symbols_) {
                 instrument.previous_close = feed_->last_price(instrument.id);
             }
-            engine_.expire_day_orders();
+            journaled_.expire_day_orders();
             for (auto& agent : agents_) {
                 prune(agent);
             }
@@ -290,7 +292,7 @@ void MarketSimulator::quote(Agent& agent, std::size_t index) {
                     OrderRequest move{slot, side, OrderType::Limit, size, price, TimeInForce::Day, !auction};
                     move.owner = agent.owner;
                     const auto start = std::chrono::steady_clock::now();
-                    const auto result = engine_.replace(instrument.id, move);
+                    const auto result = journaled_.replace(instrument.id, move);
                     record_latency(start);
                     ++stats_.requests;
                     stats_.trades += result.submit_result.trades.size();
@@ -414,7 +416,7 @@ void MarketSimulator::send(Agent& agent, std::size_t index, OrderRequest order) 
     order.self_trade_prevention = SelfTradePrevention::CancelOldest;
 
     const auto start = std::chrono::steady_clock::now();
-    const auto result = engine_.submit(symbols_[index].id, order);
+    const auto result = journaled_.submit(symbols_[index].id, order);
     record_latency(start);
 
     ++stats_.requests;
@@ -432,7 +434,7 @@ void MarketSimulator::send(Agent& agent, std::size_t index, OrderRequest order) 
 
 void MarketSimulator::cancel(Agent& agent, std::size_t index, OrderId order_id) {
     const auto start = std::chrono::steady_clock::now();
-    engine_.cancel(symbols_[index].id, order_id);
+    journaled_.cancel(symbols_[index].id, order_id);
     record_latency(start);
     ++stats_.requests;
     std::erase_if(agent.live, [&](const auto& live) { return live.first == index && live.second == order_id; });

@@ -16,7 +16,8 @@ using Price = std::int64_t;  // Integer price ticks, represented as cents in the
 using Quantity = std::uint32_t;
 using Volume = std::uint64_t;  // Aggregated quantity (level totals, traded volume) that can exceed one order's size.
 using SequenceNumber = std::uint64_t;
-using OwnerId = std::uint32_t;  // trading account or firm, used for self-trade prevention; 0 means none
+using OwnerId = std::uint32_t;   // trading account or firm, used for self-trade prevention; 0 means none
+using Timestamp = std::int64_t;  // nanoseconds, from the caller's clock, real or simulated
 
 enum class Side : std::uint8_t {
     Buy,
@@ -82,6 +83,8 @@ struct OrderRequest {
     Quantity display_quantity{};  // iceberg tranche size; 0 displays the full quantity
     OwnerId owner{};              // self-trade prevention group; 0 opts out
     SelfTradePrevention self_trade_prevention{SelfTradePrevention::None};
+
+    bool operator==(const OrderRequest&) const = default;
 };
 
 struct Trade {

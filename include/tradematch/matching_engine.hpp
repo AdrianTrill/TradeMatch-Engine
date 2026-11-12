@@ -59,6 +59,9 @@ public:
     OrderBook& book(SymbolId symbol);
     const OrderBook& book(SymbolId symbol) const;
 
+    // The capacity the symbol's book was created with, which snapshots record so restored books are sized alike.
+    const BookCapacity& capacity(SymbolId symbol) const;
+
     // Requests for an unknown symbol are rejected with RejectReason::UnknownSymbol.
     SubmitResult submit(SymbolId symbol, const OrderRequest& order);
     CancelResult cancel(SymbolId symbol, OrderId order_id);
@@ -88,6 +91,7 @@ private:
 
     struct Instrument {
         std::string name;
+        BookCapacity capacity;
         std::unique_ptr<OrderBook> book;
         std::unique_ptr<Forwarder> forwarder;
     };

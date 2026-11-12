@@ -1,5 +1,6 @@
 // Live terminal view of the matching engine running a simulated exchange session.
 #include "tradematch/simulator.hpp"
+#include "tradematch/snapshot.hpp"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -60,6 +62,7 @@ struct Options {
     bool sleep{true};
     bool headless{false};
     std::string record_path;
+    std::string journal_path;
 };
 
 // Visible width of UTF-8 text: every code point used here (box drawing, blocks, arrows) is one column wide.
@@ -499,7 +502,7 @@ std::optional<Options> parse_options(int argc, char** argv) {
         }
         if (arg == "--help" || arg == "-h") {
             std::cout << "usage: tradematch_tui [--seed N] [--speed X] [--fps N] [--frames N] [--record FILE.cast]\n"
-                         "                      [--no-sleep] [--headless]\n"
+                         "                      [--journal FILE] [--no-sleep] [--headless]\n"
                          "Press Ctrl+C to quit.\n";
             return std::nullopt;
         }
@@ -517,6 +520,8 @@ std::optional<Options> parse_options(int argc, char** argv) {
             options.frames = parse_count(arg, value);
         } else if (arg == "--record") {
             options.record_path = value;
+        } else if (arg == "--journal") {
+            options.journal_path = value;
         } else {
             throw std::invalid_argument("unknown option " + arg);
         }
@@ -534,7 +539,13 @@ int run(int argc, char** argv) {
     config.seed = options.seed;
     config.opening_auction = 8'000'000'000;  // long enough to watch the indicative price form
     config.closing_auction = 8'000'000'000;
-    tradematch::MarketSimulator sim(config);
+    std::unique_ptr<tradematch::JournalWriter> journal;
+    if (!options.journal_path.empty()) {
+        tradematch::JournalOptions journal_options;
+        journal_options.truncate = true;  // a new session starts from an empty engine
+        journal = std::make_unique<tradematch::JournalWriter>(options.journal_path, journal_options);
+    }
+    tradematch::MarketSimulator sim(config, journal.get());
 
     std::ofstream cast;
     if (!options.record_path.empty()) {
@@ -580,8 +591,16 @@ int run(int argc, char** argv) {
         std::cout << "\x1b[0m\x1b[?25h\x1b[?1049l" << std::flush;
     }
     const auto& stats = sim.stats();
-    std::cout << "simulated " << clock_time(sim.now()) << " over " << sim.day() << " day(s): " << stats.requests
-              << " requests, " << stats.trades << " trades, " << stats.auctions << " auctions\n";
+    std::cout << "simulated " << clock_time(sim.now()) << " over " << sim.day()
+              << " day(s): " << with_commas(stats.requests) << " requests, " << with_commas(stats.trades) << " trades, "
+              << stats.auctions << " auctions\n";
+    if (journal) {
+        journal->close();
+        std::cout << "journal " << options.journal_path << ": " << with_commas(journal->last_sequence())
+                  << " commands, " << with_commas(journal->size_bytes()) << " bytes\n";
+    }
+    std::cout << "state hash 0x" << std::hex << std::setw(16) << std::setfill('0')
+              << tradematch::state_hash(sim.engine()) << std::dec << '\n';
     return 0;
 }
 

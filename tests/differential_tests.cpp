@@ -14,6 +14,7 @@ using tradematch::testing::Operation;
 using tradematch::testing::OperationGenerator;
 
 constexpr tradematch::BookCapacity kTinyCapacity{1, 1, 1};
+constexpr std::uint64_t kSnapshotInterval = 89;  // restore the engine from a snapshot of itself this often
 
 struct Options {
     std::uint64_t first_seed{1};
@@ -69,11 +70,16 @@ int run(int argc, char** argv) {
         for (std::uint64_t index = 0; index < options.operations; ++index) {
             const auto op = generator.next(harness.reference());
             history.push_back(op);
-            if (history.size() > 12U) {
+            auto mismatch = harness.apply(op);
+            if (mismatch.empty() && index % kSnapshotInterval == kSnapshotInterval - 1) {
+                // Snapshots don't touch the reference, so the generated stream stays the same for every seed.
+                history.push_back(Operation{tradematch::testing::OpKind::Snapshot, {}});
+                mismatch = harness.apply(history.back());
+            }
+            while (history.size() > 12U) {
                 history.pop_front();
             }
 
-            const auto mismatch = harness.apply(op);
             if (!mismatch.empty()) {
                 std::cout << "[FAIL] differential seed=" << seed << " op=" << index << ": " << mismatch << '\n';
                 std::cout << "  most recent operations (last one diverged):\n";
@@ -98,6 +104,7 @@ int run(int argc, char** argv) {
         totals.self_trade_cancels += stats.self_trade_cancels;
         totals.auctions += stats.auctions;
         totals.auction_trades += stats.auction_trades;
+        totals.snapshots += stats.snapshots;
         totals.max_resting_orders = std::max(totals.max_resting_orders, stats.max_resting_orders);
     }
 
@@ -108,7 +115,8 @@ int run(int argc, char** argv) {
               << " amends_in_place=" << totals.amends_in_place << " day_expiries=" << totals.day_expiries
               << " stops_triggered=" << totals.stops_triggered << " self_trade_cancels=" << totals.self_trade_cancels
               << " auctions=" << totals.auctions << " auction_trades=" << totals.auction_trades
-              << " max_resting_orders=" << totals.max_resting_orders << '\n';
+              << " snapshot_restores=" << totals.snapshots << " max_resting_orders=" << totals.max_resting_orders
+              << '\n';
     return 0;
 }
 

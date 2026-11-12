@@ -1,7 +1,9 @@
 // Proves the zero-allocation claim. Global operator new is replaced to count every heap allocation in the process,
-// then the benchmark's 1,000,000-operation stream is replayed through both engines after warm-up. The test fails if
-// the v2 engine allocates even once; the v1 baseline count is printed for comparison.
+// then the benchmark's 1,000,000-operation stream is replayed through each engine after warm-up. The test fails if
+// the v2 engine allocates even once, with or without a write-ahead journal; the v1 baseline count is printed for
+// comparison.
 #include "baseline/map_order_book.hpp"
+#include "journaled_book.hpp"
 #include "tradematch/order_book.hpp"
 #include "workload.hpp"
 
@@ -9,12 +11,16 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <new>
+#include <random>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 
 namespace {
 
@@ -119,6 +125,17 @@ int run() {
     auto v2 = std::make_unique<tradematch::OrderBook>(capacity);
     const auto v2_allocations = count_allocations(*v2, warmup, measured);
 
+    std::random_device device;
+    const auto journal_path =
+        std::filesystem::temp_directory_path() / ("tradematch-allocation-test-" + std::to_string(device()) + ".tmj");
+    auto journaled = std::make_unique<tradematch::bench::JournaledOrderBook>(capacity,
+                                                                             journal_path,
+                                                                             tradematch::Durability::Buffered);
+    const auto journaled_allocations = count_allocations(*journaled, warmup, measured);
+    journaled.reset();
+    std::error_code ignored;
+    std::filesystem::remove(journal_path, ignored);
+
     auto v1 = std::make_unique<tradematch::baseline::MapOrderBook>();
     const auto v1_allocations = count_allocations(*v1, warmup, measured);
 
@@ -129,8 +146,10 @@ int run() {
     std::cout << "heap allocations over " << measured.size() << " measured operations:\n";
     std::cout << "  v1 baseline  " << v1_allocations << " (" << per_operation(v1_allocations) << " per operation)\n";
     std::cout << "  v2           " << v2_allocations << " (" << per_operation(v2_allocations) << " per operation)\n";
+    std::cout << "  v2 + journal " << journaled_allocations << " (" << per_operation(journaled_allocations)
+              << " per operation)\n";
 
-    if (v2_allocations != 0) {
+    if (v2_allocations != 0 || journaled_allocations != 0) {
         std::cout << "[FAIL] the v2 request path allocated on the heap\n";
         return 1;
     }
@@ -138,7 +157,7 @@ int run() {
         std::cout << "[FAIL] allocation counting is not working: the v1 baseline should allocate\n";
         return 1;
     }
-    std::cout << "[PASS] the v2 engine performed zero heap allocations in steady state\n";
+    std::cout << "[PASS] the v2 engine performed zero heap allocations in steady state, journaled or not\n";
     return 0;
 }
 

@@ -2,6 +2,7 @@
 #define TRADEMATCH_ORDER_BOOK_HPP
 
 #include "tradematch/book_listener.hpp"
+#include "tradematch/book_state.hpp"
 #include "tradematch/detail/order_index.hpp"
 #include "tradematch/types.hpp"
 
@@ -22,6 +23,8 @@ struct BookCapacity {
     std::size_t price_levels{256};  // per side
     std::size_t trades_per_call{64};
     std::size_t stop_orders{64};
+
+    bool operator==(const BookCapacity&) const = default;
 };
 
 // Price-time-priority limit order book for a single instrument.
@@ -83,6 +86,13 @@ public:
     std::optional<Price> best_ask() const noexcept;
     std::optional<Price> last_trade_price() const noexcept;
     BookSnapshot snapshot() const;
+
+    // The book's complete logical state (see BookState), and its inverse. import_state() replaces the book's contents
+    // only if the state is one a book can reach: sorted, non-empty levels, unique IDs and sequence numbers, valid
+    // orders, no crossed continuous book, and no stop that should already have triggered. Otherwise it throws
+    // std::invalid_argument and leaves the book unchanged. Pool capacities are kept, and listeners are not notified.
+    BookState export_state() const;
+    void import_state(const BookState& state);
 
     std::size_t order_count() const noexcept {
         return index_.size();
@@ -215,6 +225,9 @@ private:
                       Price price,
                       Quantity quantity);
     static RestingOrderView view_of(const OrderNode& node, Price price) noexcept;
+
+    static void validate_state(const BookState& state);
+    void load_state(const BookState& state);
 
     bool is_triggered(const OrderRequest& stop) const noexcept;
     void add_stop(const OrderRequest& order, SequenceNumber sequence);
