@@ -39,6 +39,8 @@ The engine also compiles to WebAssembly. **[Open the playground](https://adriant
 
 The chart works like a trading terminal's. Candles of 1 second to 1 minute sit on a time axis, where each day's opening and closing auctions and the close are shaded and every auction cross is marked with its volume. The hidden fair value the market makers quote around is drawn through them, with the day's VWAP. A crosshair reads any candle, the wheel zooms, and dragging looks back in time. Above the chart, every stock's ticker shows its day change and its last minute as a sparkline, and a timeline of the trading day counts down to the next phase. While a call auction collects orders, the page shows what its uncross would do at that moment: the price, the shares that would trade, and the imbalance left over, on the chart, in the order book, and in the depth chart, where the buyers' and sellers' curves cross at the uncross price. The order book flashes as its levels change, groups prices into coarser steps, and, on hover, reads out the shares, average price, and value of sweeping the book down to any level; the tape prints each auction's uncross as one trade, however many orders it filled.
 
+**Trade against the agents.** The order ticket sends limit, market, stop, and stop-limit orders, with GTC, DAY, IOC, or FOK and post-only and iceberg options, into the same engine the agents trade on; a click on the order book prices an order, and the ticket estimates what would trade at once. Working orders are marked in the book and drawn on the chart as lines: drag one to a new price, or click its × to cancel. Fills land on the chart and in an orders panel that tells maker from taker and auction fills, and positions are marked to the last trade, with realized and unrealized P&L.
+
 <p align="center">
   <img src="docs/assets/playground.png" width="857" alt="The browser playground: the order book with depth bars, one-second candles around the simulator's hidden fair value, a cumulative depth chart, and the trade tape, during continuous trading">
 </p>
@@ -93,6 +95,7 @@ This is the kind of systems problem that rewards precision more than size. A mat
 - An agent-based market simulator with full trading sessions, and a live terminal UI to watch it
 - A browser playground: the simulator and the command line compiled to WebAssembly, deployed to GitHub Pages
 - Python bindings for the book, the simulator, and ITCH replay, with a market microstructure notebook
+- Trading in the browser against the simulator's agents: an order ticket, orders on the chart that drag to a new price, and live P&L
 - Deterministic benchmark/demo scenarios
 
 ## API Overview
@@ -541,6 +544,8 @@ make scenarios                                    # check every scenario against
 | Whale | Works large icebergs that show 300 to 500 shares at a time, and parks stop and stop-limit orders 8 to 20 ticks beyond fair value |
 
 Every simulated day is a full exchange session: an opening call auction, continuous trading, a closing call auction, then day-order expiry before the next open. During the auctions the screen shows the indicative price, matched volume, and surplus as orders arrive. Every agent order carries an owner and self-trade prevention, and the `STP` counter shows how often an agent would have traded with itself.
+
+Orders can also come from outside the simulation: `MarketSimulator::submit`, `cancel`, and `replace` send them at the current simulated time, under the simulator's own order IDs. They meet the agents' orders like any other, are journaled with theirs, and count in the stats, while cancels and replaces reach only outside orders. The [browser playground](#try-it-in-your-browser) uses them to let visitors trade.
 
 The screen shows ten levels of depth per side with size bars, the spread and mid, the trade tape with the aggressor side and auction prints, one-second candles, the session clock, and live counters. These include the engine's request latency (p50 and p99, market data publishing included).
 

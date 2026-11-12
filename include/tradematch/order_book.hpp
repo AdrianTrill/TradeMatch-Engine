@@ -88,6 +88,8 @@ public:
 
     bool has_order(OrderId order_id) const noexcept;
     bool has_stop_order(OrderId order_id) const noexcept;
+    // Whether a market order is waiting for the auction's uncross.
+    bool has_auction_market_order(OrderId order_id) const noexcept;
     std::optional<RestingOrderView> get_order(OrderId order_id) const;
     std::vector<RestingOrderView> get_orders_at_level(Side side, Price price) const;
     std::optional<Price> best_bid() const noexcept;
@@ -235,7 +237,6 @@ private:
     std::optional<Equilibrium> find_equilibrium() const;
     void execute_auction(Price price, Volume quantity);
     bool remove_auction_market_order(OrderId order_id, Quantity& quantity);
-    bool has_auction_market_order(OrderId order_id) const noexcept;
     void record_trade(Side aggressor_side,
                       OrderId aggressor_id,
                       OrderId resting_order_id,

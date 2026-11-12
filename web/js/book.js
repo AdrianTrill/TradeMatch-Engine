@@ -98,10 +98,19 @@ export class BookView {
     return cells;
   }
 
-  update(view) {
+  // `orders` are the visitor's working orders on this symbol, marked on the levels they rest at.
+  update(view, orders = []) {
     const count = this.rows;
     const asks = group(view.asks, this.grouping, Math.ceil).slice(0, count);
     const bids = group(view.bids, this.grouping, Math.floor).slice(0, count);
+    this.mine = new Map();
+    for (const [, , side, type, , , limit, , , , remaining, status] of orders) {
+      if (type === 'LIMIT' && status === 'resting') {
+        const key = side === 'BUY' ? `bid${Math.floor(limit / this.grouping) * this.grouping}`
+          : `ask${Math.ceil(limit / this.grouping) * this.grouping}`;
+        this.mine.set(key, (this.mine.get(key) ?? 0) + remaining);
+      }
+    }
     this.sides = { ask: asks, bid: bids };
     const largest = Math.max(1, ...asks.map((level) => level[1]), ...bids.map((level) => level[1]));
     const deepest = Math.max(1, total(asks), total(bids));
@@ -135,11 +144,14 @@ export class BookView {
     text(cell.orders, level ? level[2] : '');
     setWidth(cell.bar, level ? level[1] / largest : 0);
     setWidth(cell.depthBar, level ? depthShare : 0);
+    const key = level ? `${cell.side}${level[0]}` : '';
+    const mine = level ? this.mine.get(key) : undefined;
+    cell.row.classList.toggle('mine', mine !== undefined);
+    cell.row.title = mine === undefined ? '' : `Your order${mine > 0 ? `: ${grouped(mine)} shares` : ''}`;
     if (!level) {
       return;
     }
     // Flash a level whose size changed: in its side's color when it grew, neutral when it shrank.
-    const key = `${cell.side}${level[0]}`;
     const before = this.sizes.get(key);
     this.shown.set(key, level[1]);
     if (before !== undefined && before !== level[1] && now - cell.flashed > FLASH_GAP) {

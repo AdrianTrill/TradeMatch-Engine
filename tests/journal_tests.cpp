@@ -598,6 +598,52 @@ void test_replaying_a_simulated_session_rebuilds_identical_books() {
            "Every book should match exactly: levels, queues, icebergs, stops, and counters.");
 }
 
+// Outside orders, as the browser playground sends them, are journaled with the agents' and replay to the same books.
+void test_outside_orders_replay_with_the_session() {
+    const TempDir dir;
+    const auto path = dir / "session.tmj";
+    std::uint64_t live_hash = 0;
+    {
+        JournalWriter journal(path, JournalOptions{Durability::Buffered, true, 1});
+        tradematch::MarketSimulator sim(short_day(), &journal);
+        std::size_t traded = 0;
+        for (int second = 0; second < 40; ++second) {
+            sim.run_for(kSecond);
+            const tradematch::OrderBook& book = sim.engine().book(sim.symbol(1));
+            const auto ask = book.best_ask();
+            const auto bid = book.best_bid();
+            if (sim.session() != tradematch::SessionPhase::Continuous || !ask || !bid) {
+                continue;
+            }
+            tradematch::OrderRequest take{0,
+                                          tradematch::Side::Buy,
+                                          tradematch::OrderType::Limit,
+                                          300,
+                                          *ask,
+                                          tradematch::TimeInForce::ImmediateOrCancel};
+            take.owner = sim.participant_owner();
+            traded += sim.submit(1, take).trades.size();
+            tradematch::OrderRequest rest{0,
+                                          tradematch::Side::Sell,
+                                          tradematch::OrderType::Limit,
+                                          200,
+                                          *ask + 3,
+                                          tradematch::TimeInForce::Day};
+            rest.owner = sim.participant_owner();
+            const auto rested = sim.submit(1, rest);
+            if (second % 3 == 0) {
+                sim.cancel(1, rested.order_id);
+            }
+        }
+        expect(traded > 0U, "The outside orders should trade.");
+        live_hash = tradematch::state_hash(sim.engine());
+        journal.close();
+    }
+    tradematch::MatchingEngine replayed;
+    tradematch::recover(replayed, path);
+    expect(tradematch::state_hash(replayed) == live_hash, "The replayed engine should hash the same.");
+}
+
 // Applies a generated operation through the journaled engine and mirrors it into the generator's view.
 void apply_generated(tradematch::JournaledEngine& journaled,
                      tradematch::testing::ReferenceBook& view,
@@ -894,6 +940,7 @@ int run_all_tests() {
         {"error_paths_are_reported", test_error_paths_are_reported},
         {"replaying_a_simulated_session_rebuilds_identical_books",
          test_replaying_a_simulated_session_rebuilds_identical_books},
+        {"outside_orders_replay_with_the_session", test_outside_orders_replay_with_the_session},
         {"recovery_from_a_snapshot_and_the_journal_tail", test_recovery_from_a_snapshot_and_the_journal_tail},
         {"recovery_refuses_gaps_between_snapshot_and_journal", test_recovery_refuses_gaps_between_snapshot_and_journal},
         {"snapshot_files_detect_damage", test_snapshot_files_detect_damage},

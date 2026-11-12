@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace tradematch {
@@ -414,9 +415,16 @@ void MarketSimulator::send(Agent& agent, std::size_t index, OrderRequest order) 
     order.order_id = next_order_id_++;
     order.owner = agent.owner;
     order.self_trade_prevention = SelfTradePrevention::CancelOldest;
+    const SubmitResult result = place(index, order);
+    if (result.rested || result.pending_trigger) {
+        agent.live.emplace_back(index, order.order_id);
+    }
+}
 
+// Sends an order to the exchange, timed, and counted in the stats.
+SubmitResult MarketSimulator::place(std::size_t index, const OrderRequest& order) {
     const auto start = std::chrono::steady_clock::now();
-    const auto result = journaled_.submit(symbols_[index].id, order);
+    const SubmitResult result = journaled_.submit(symbols_[index].id, order);
     record_latency(start);
 
     ++stats_.requests;
@@ -427,9 +435,74 @@ void MarketSimulator::send(Agent& agent, std::size_t index, OrderRequest order) 
     stats_.trades += result.trades.size();
     stats_.stops_triggered += result.triggered_stops.size();
     stats_.self_trade_cancels += result.self_trade_cancels.size();
-    if (result.rested || result.pending_trigger) {
-        agent.live.emplace_back(index, order.order_id);
+    return result;
+}
+
+OwnerId MarketSimulator::participant_owner() const noexcept {
+    return static_cast<OwnerId>(agents_.size() + 1);  // agents own 1 through agents_.size()
+}
+
+void MarketSimulator::check_outside_owner(OwnerId owner) const {
+    if (owner != 0 && owner < participant_owner()) {
+        throw std::invalid_argument("an outside order can't use an agent's owner ID");
     }
+}
+
+SubmitResult MarketSimulator::submit(std::size_t symbol_index, OrderRequest order) {
+    check_outside_owner(order.owner);
+    if (symbol_index >= symbols_.size()) {
+        throw std::out_of_range("no symbol has this index");
+    }
+    order.order_id = next_order_id_++;
+    const SubmitResult result = place(symbol_index, order);
+    if (result.accepted) {
+        outside_orders_.insert(order.order_id);
+    }
+    return result;
+}
+
+CancelResult MarketSimulator::cancel(std::size_t symbol_index, OrderId order_id) {
+    const SymbolId symbol = symbols_.at(symbol_index).id;
+    ++stats_.requests;
+    if (!outside_orders_.contains(order_id)) {
+        ++stats_.rejects;
+        ++stats_.rejects_by_reason[RejectReason::UnknownOrder];
+        return CancelResult{order_id, false, RejectReason::UnknownOrder, 0, "no outside order has this ID"};
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const CancelResult result = journaled_.cancel(symbol, order_id);
+    record_latency(start);
+    if (!result.cancelled) {
+        ++stats_.rejects;
+        ++stats_.rejects_by_reason[result.reject_reason];
+    }
+    return result;
+}
+
+ReplaceResult MarketSimulator::replace(std::size_t symbol_index, const OrderRequest& replacement) {
+    check_outside_owner(replacement.owner);
+    const SymbolId symbol = symbols_.at(symbol_index).id;
+    ++stats_.requests;
+    if (!outside_orders_.contains(replacement.order_id)) {
+        ++stats_.rejects;
+        ++stats_.rejects_by_reason[RejectReason::UnknownOrder];
+        ReplaceResult rejected;
+        rejected.order_id = replacement.order_id;
+        rejected.reject_reason = RejectReason::UnknownOrder;
+        rejected.message = "no outside order has this ID";
+        return rejected;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const ReplaceResult result = journaled_.replace(symbol, replacement);
+    record_latency(start);
+    if (!result.replaced) {
+        ++stats_.rejects;
+        ++stats_.rejects_by_reason[result.reject_reason];
+    }
+    stats_.trades += result.submit_result.trades.size();
+    stats_.stops_triggered += result.submit_result.triggered_stops.size();
+    stats_.self_trade_cancels += result.submit_result.self_trade_cancels.size();
+    return result;
 }
 
 void MarketSimulator::cancel(Agent& agent, std::size_t index, OrderId order_id) {

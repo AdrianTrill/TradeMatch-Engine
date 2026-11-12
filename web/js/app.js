@@ -12,6 +12,7 @@ import { readPalette } from './palette.js';
 import { TapeView } from './tape.js';
 import { startTerminal } from './terminal.js';
 import { toast } from './toast.js';
+import { Account, Ticket } from './trading.js';
 
 const STEP_SECONDS = 0.01;  // simulated time per simulator step
 const SPEEDS = [0.5, 1, 2, 5, 10, 25];  // simulated seconds per second
@@ -67,8 +68,67 @@ const tickers = new Tickers($('#tickers'), (index) => selectSymbol(index));
 const quote = new Quote($('#quote').parentElement);
 const session = new Session($('#session'));
 const depth = new DepthChart($('#depth'));
-const book = new BookView($('#book'));
+const book = new BookView($('#book'), (picked) => ticket.pick(picked));
 const tape = new TapeView($('#tape'), $('#trade-rate'));
+const ticket = new Ticket($('#ticket'), market, announceOrder);
+const account = new Account($('.orders-panel'), $('#account-card'), market, {
+  onCancel: cancelOrder,
+  onFlatten: closePosition,
+});
+chart.onOrders({ cancel: cancelOrder, move: moveOrder });
+
+// Trading against the agents ---------------------------------------------------------------------------------------
+
+const describe = (request, symbol) =>
+  `${request.side === 'BUY' ? 'buy' : 'sell'} ${grouped(request.quantity)} ${symbol}`;
+
+// What happened to an order just sent. Fills are announced as the engine reports them.
+function announceOrder(request, result) {
+  const symbol = market.symbols[market.symbol] ?? '';
+  if (!result.accepted) {
+    toast(`Order rejected: ${result.message}`, 'error', 4000);
+  } else if (result.queued) {
+    toast(`Your ${describe(request, symbol)} waits for the auction's uncross`);
+  } else if (result.pending) {
+    toast(`Your ${describe(request, symbol)} waits for its stop at ${price(request.stop)}`);
+  } else if (result.rested) {
+    toast(`Your ${describe(request, symbol)} rests at ${price(request.price)}${
+      result.filled > 0 ? ` after ${grouped(result.filled)} traded` : ''}`);
+  }
+}
+
+function cancelOrder(id) {
+  if (id === null) {
+    const cancelled = market.instance.cancelAll();
+    toast(`Cancelled ${cancelled} order${cancelled === 1 ? '' : 's'}`);
+    return;
+  }
+  const result = JSON.parse(market.instance.cancel(id));
+  toast(result.cancelled ? `Cancelled ${grouped(result.quantity)} shares` : `Couldn't cancel: ${result.message}`,
+    result.cancelled ? 'info' : 'error');
+}
+
+function moveOrder(id, target, remaining) {
+  const result = JSON.parse(market.instance.amend(id, target, remaining));
+  toast(result.replaced ? `Moved your order to ${price(target)}` : `Couldn't move the order: ${result.message}`,
+    result.replaced ? 'info' : 'error');
+}
+
+// Closes a position with a market order the other way.
+function closePosition(symbol) {
+  const shares = account.position(symbol).shares;
+  if (shares === 0) {
+    return;
+  }
+  const request = { side: shares > 0 ? 'SELL' : 'BUY', type: 'MARKET', quantity: Math.abs(shares), price: 0, stop: 0,
+    tif: 'IOC', postOnly: false, display: 0 };
+  const result = JSON.parse(market.instance.submit(symbol, request));
+  if (!result.accepted) {
+    toast(`Couldn't close the position: ${result.message}`, 'error');
+  } else if (result.queued) {
+    toast(`Closing ${market.symbols[symbol]} at the auction's uncross`);
+  }
+}
 
 // A market for the seed, fast-forwarded by `skip` simulated seconds. The URL keeps the seed, so a market can be shared;
 // a first visit starts a minute into the first day, so the chart already has candles.
@@ -80,6 +140,8 @@ function newMarket(seed, skip = 0) {
   quote.reset();
   book.reset();
   tape.reset();
+  account.reset();
+  ticket.symbol = -1;
   market.histories = [];
   const phases = JSON.parse(market.instance.config()).phases.map(([, length]) => length);
   market.config = {
@@ -157,6 +219,11 @@ function renderAuction(view) {
 }
 
 function render(view, candles) {
+  market.symbols = view.symbols;
+  const daySeconds = market.config.dayLength / 1e9;
+  account.update(view, view.symbols, daySeconds);
+  const overlay = account.overlay(market.symbol);
+  ticket.update(view, market.symbol);
   tickers.update(view.watch, market.symbol);
   quote.update(view.watch[market.symbol]);
   session.update(view, market.config);
@@ -167,10 +234,10 @@ function render(view, candles) {
   text($('#auctions'), grouped(view.auctions));
   text($('#resting'), grouped(view.orders));
 
-  chart.draw({ view, history: candles, config: market.config });
+  chart.draw({ view, history: candles, config: market.config, overlay });
   depth.draw(view);
-  book.update(view);
-  tape.update(view, market.config.dayLength / 1e9);
+  book.update(view, overlay.orders);
+  tape.update(view, daySeconds);
 }
 
 function frame(now) {

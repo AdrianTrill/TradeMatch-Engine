@@ -92,6 +92,80 @@ if (tapeOk && watched === view.symbols.join() && view.watch.every((summary) => s
 }
 market.delete();
 
+// Trading from the page: an order that takes liquidity fills at once, a passive one rests and can be amended and
+// cancelled, the agents' orders are out of reach, rejects say why, and every fill is reported once.
+{
+  const trader = new tradematch.LiveMarket(9);
+  trader.step(1_000);  // ten seconds in: continuous trading
+  const book = JSON.parse(trader.snapshot(0, 5, Infinity));
+  const order = (fields) => ({ side: 'BUY', type: 'LIMIT', quantity: 100, price: 0, stop: 0, tif: 'GTC', postOnly: false,
+    display: 0, ...fields });
+  const ask = book.asks[0][0];
+  const bid = book.bids[0][0];
+  const problems = [];
+
+  const taken = JSON.parse(trader.submit(0, order({ quantity: 500, price: ask + 5, tif: 'IOC' })));
+  let account = JSON.parse(trader.account());
+  const takerFills = account.fills.filter((fill) => fill[3] === taken.id);
+  if (!taken.accepted || taken.filled === 0 || takerFills.reduce((sum, fill) => sum + fill[6], 0) !== taken.filled ||
+      !takerFills.every((fill) => fill[7] === 'T' && fill[4] === 'BUY')) {
+    problems.push(`a taking order: ${JSON.stringify(taken)} ${JSON.stringify(takerFills)}`);
+  }
+  if (!account.done.some(([id, , , , filled]) => id === taken.id && filled === taken.filled)) {
+    problems.push(`a finished IOC order should be reported: ${JSON.stringify(account.done)}`);
+  }
+  if (JSON.parse(trader.account()).fills.length !== 0) {
+    problems.push('fills should be reported once');
+  }
+
+  const rested = JSON.parse(trader.submit(0, order({ side: 'SELL', quantity: 300, price: ask + 50 })));
+  account = JSON.parse(trader.account());
+  const working = account.orders.find(([id]) => id === rested.id);
+  const amended = JSON.parse(trader.amend(rested.id, ask + 50, 200));
+  const refused = JSON.parse(trader.cancel(1));
+  const cancelled = JSON.parse(trader.cancel(rested.id));
+  account = JSON.parse(trader.account());
+  if (!rested.rested || !working || working[10] !== 300 || working[11] !== 'resting' || !amended.replaced ||
+      !amended.kept_priority || refused.cancelled || !cancelled.cancelled || cancelled.quantity !== 200 ||
+      !account.done.some(([id, , , , , reason]) => id === rested.id && reason === 'cancelled')) {
+    problems.push(`a resting order: ${JSON.stringify([rested, working, amended, refused, cancelled])}`);
+  }
+
+  // An amend that makes the order marketable trades at once, and the order finishes filled at its own size.
+  const parked = JSON.parse(trader.submit(0, order({ quantity: 200, price: bid - 30 })));
+  const lifted = JSON.parse(trader.amend(parked.id, ask + 20, 200));
+  account = JSON.parse(trader.account());
+  const finished = account.done.find(([id]) => id === parked.id);
+  if (!lifted.replaced || !finished || finished[3] !== 200 || finished[4] !== 200 || finished[5] !== 'filled') {
+    problems.push(`a marketable amend: ${JSON.stringify([lifted, finished])}`);
+  }
+
+  const empty = JSON.parse(trader.submit(0, order({ quantity: 0, price: bid })));
+  const crossing = JSON.parse(trader.submit(0, order({ price: ask + 10, postOnly: true })));
+  if (empty.accepted || empty.reject !== 'INVALID_QUANTITY' || crossing.reject !== 'POST_ONLY_WOULD_CROSS') {
+    problems.push(`rejects: ${JSON.stringify([empty, crossing])}`);
+  }
+
+  // A bid joining the best price is filled by the agents' selling, as the maker.
+  const latest = JSON.parse(trader.snapshot(0, 1, Infinity));
+  const joined = JSON.parse(trader.submit(0, order({ price: latest.bids[0][0] })));
+  const makerFills = [];
+  for (let second = 0; second < 30 && makerFills.length === 0; second += 1) {
+    trader.step(100);
+    makerFills.push(...JSON.parse(trader.account()).fills.filter((fill) => fill[3] === joined.id));
+  }
+  if (makerFills.length === 0 || !makerFills.every((fill) => fill[7] === 'M')) {
+    problems.push(`a joined bid should fill as the maker: ${JSON.stringify(makerFills)}`);
+  }
+  trader.delete();
+  if (problems.length === 0) {
+    console.log(`[PASS] trading: took ${taken.filled} at once, amended and cancelled a resting order, filled as maker`);
+  } else {
+    failures += 1;
+    console.log(`[FAIL] trading: ${problems.join('; ')}`);
+  }
+}
+
 const terminal = new tradematch.Terminal();
 const reply = terminal.run('add ACME') + terminal.run('buy ACME 10 @ 100.00');
 terminal.delete();

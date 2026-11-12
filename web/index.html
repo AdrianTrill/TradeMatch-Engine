@@ -23,6 +23,8 @@
     <symbol id="i-forward" viewBox="0 0 24 24"><path d="m6 7 5 5-5 5M13 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M6 12h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 6v12M6 12h12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
     <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
   </svg>
 
@@ -138,6 +140,107 @@
             <span class="panel-note" id="depth-note">Cumulative size by price</span>
           </header>
           <div class="panel-body canvas-wrap"><canvas id="depth"></canvas></div>
+        </section>
+
+        <section class="panel ticket-panel" aria-label="Order ticket">
+          <header class="panel-head">
+            <h2>Trade</h2>
+            <span class="panel-note head-end">Against the agents, in the same engine</span>
+          </header>
+          <form class="panel-body ticket" id="ticket" autocomplete="off" novalidate>
+            <span class="ticket-symbol" id="ticket-symbol" hidden></span>
+            <div class="side-toggle" role="radiogroup" aria-label="Side">
+              <button type="button" class="side-button buy" data-side="BUY" role="radio">Buy</button>
+              <button type="button" class="side-button sell" data-side="SELL" role="radio">Sell</button>
+            </div>
+            <div class="order-types" role="radiogroup" aria-label="Order type">
+              <button type="button" data-type="LIMIT" role="radio">Limit</button>
+              <button type="button" data-type="MARKET" role="radio">Market</button>
+              <button type="button" data-type="STOP" role="radio">Stop</button>
+              <button type="button" data-type="STOP_LIMIT" role="radio">Stop limit</button>
+            </div>
+            <label class="field stop-field">
+              <span class="field-label">Stop price</span>
+              <span class="stepper">
+                <button type="button" data-field="stop" data-step="-1" aria-label="Lower the stop price"><svg class="icon"><use href="#i-minus"/></svg></button>
+                <input id="stop" inputmode="decimal" spellcheck="false">
+                <button type="button" data-field="stop" data-step="1" aria-label="Raise the stop price"><svg class="icon"><use href="#i-plus"/></svg></button>
+              </span>
+            </label>
+            <label class="field price-field">
+              <span class="field-label">Limit price</span>
+              <span class="stepper">
+                <button type="button" data-field="price" data-step="-1" aria-label="Lower the price"><svg class="icon"><use href="#i-minus"/></svg></button>
+                <input id="price" inputmode="decimal" spellcheck="false">
+                <button type="button" data-field="price" data-step="1" aria-label="Raise the price"><svg class="icon"><use href="#i-plus"/></svg></button>
+              </span>
+            </label>
+            <div class="chips price-field" aria-label="Fill in the price">
+              <button type="button" data-fill="bid">Bid</button>
+              <button type="button" data-fill="mid">Mid</button>
+              <button type="button" data-fill="ask">Ask</button>
+            </div>
+            <label class="field">
+              <span class="field-label">Quantity</span>
+              <span class="stepper">
+                <button type="button" data-field="quantity" data-step="-1" aria-label="100 shares fewer"><svg class="icon"><use href="#i-minus"/></svg></button>
+                <input id="quantity" inputmode="numeric" spellcheck="false" value="500">
+                <button type="button" data-field="quantity" data-step="1" aria-label="100 shares more"><svg class="icon"><use href="#i-plus"/></svg></button>
+              </span>
+            </label>
+            <div class="chips" aria-label="Fill in the quantity">
+              <button type="button" data-shares="100">100</button>
+              <button type="button" data-shares="500">500</button>
+              <button type="button" data-shares="1000">1K</button>
+              <button type="button" data-shares="5000">5K</button>
+            </div>
+            <div class="field tif">
+              <span class="field-label">Time in force</span>
+              <div class="segmented compact" role="radiogroup" aria-label="Time in force">
+                <button type="button" data-tif="GTC" role="radio">GTC</button>
+                <button type="button" data-tif="DAY" role="radio">Day</button>
+                <button type="button" data-tif="IOC" role="radio">IOC</button>
+                <button type="button" data-tif="FOK" role="radio">FOK</button>
+              </div>
+            </div>
+            <div class="options">
+              <label class="check post-only-option"><input type="checkbox" id="post-only"><span>Post only</span></label>
+              <label class="check iceberg-option"><input type="checkbox" id="iceberg"><span>Iceberg, showing</span>
+                <input class="inline" id="display" inputmode="numeric" value="100" aria-label="Shares shown"></label>
+            </div>
+            <dl class="estimate">
+              <div><dt>Trades now</dt><dd id="estimate-fill">–</dd></div>
+              <div><dt>Value</dt><dd id="estimate-value">–</dd></div>
+            </dl>
+            <button type="submit" class="submit" id="submit">Buy</button>
+          </form>
+          <div class="account-card" id="account-card">
+            <div class="pnl-row">
+              <div>
+                <div class="field-label">Your P&amp;L</div>
+                <div class="pnl-value" id="pnl">$0.00</div>
+              </div>
+              <svg class="pnl-chart" id="pnl-chart" viewBox="0 0 200 40" preserveAspectRatio="none" aria-hidden="true">
+                <path class="pnl-zero"/><path class="pnl-area"/><path class="pnl-line"/>
+              </svg>
+            </div>
+            <dl class="pnl-split">
+              <div><dt>Realized</dt><dd id="pnl-realized">$0.00</dd></div>
+              <div><dt>Unrealized</dt><dd id="pnl-unrealized">$0.00</dd></div>
+            </dl>
+          </div>
+        </section>
+
+        <section class="panel orders-panel" aria-label="Your orders">
+          <header class="panel-head">
+            <div class="tabs" role="tablist">
+              <button class="tab active" data-tab="open" role="tab" aria-selected="true">Open orders <span class="count" data-count="open">0</span></button>
+              <button class="tab" data-tab="fills" role="tab" aria-selected="false">Fills <span class="count" data-count="fills">0</span></button>
+              <button class="tab" data-tab="positions" role="tab" aria-selected="false">Positions <span class="count" data-count="positions">0</span></button>
+            </div>
+            <button class="text-button head-end" data-action="cancel-all" hidden>Cancel all</button>
+          </header>
+          <div class="panel-body account-table"></div>
         </section>
 
         <section class="panel tape-panel">

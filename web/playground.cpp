@@ -7,20 +7,25 @@
 #include "tradematch/simulator.hpp"
 
 #include <emscripten/bind.h>
+#include <emscripten/val.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
+
+using tradematch::Side;
 
 void price_or_null(std::ostringstream& json, std::optional<tradematch::Price> price) {
     if (price) {
@@ -44,6 +49,40 @@ constexpr std::size_t kMaxCandles = 20'000;  // one-second candles sent at most,
 constexpr std::size_t kSparkline = 60;       // closing prices of the last minute's candles, for the market watch
 constexpr std::size_t kTape = 120;           // prints kept on each symbol's tape
 constexpr std::size_t kTapeSent = 60;        // the newest of them sent with each snapshot
+
+// A whole number from JavaScript, or 0, which the engine rejects, for anything that isn't one in range.
+template <typename Integer>
+Integer whole(const emscripten::val& value) {
+    if (!value.isNumber()) {
+        return 0;
+    }
+    const double number = value.as<double>();
+    if (!(number >= 0.0 && number <= 1e12) || number != std::floor(number)) {
+        return 0;
+    }
+    return static_cast<Integer>(std::min(number, static_cast<double>(std::numeric_limits<Integer>::max())));
+}
+
+tradematch::OrderType order_type(const std::string& name) {
+    for (const auto type :
+         {tradematch::OrderType::Market, tradematch::OrderType::Stop, tradematch::OrderType::StopLimit}) {
+        if (name == tradematch::to_string(type)) {
+            return type;
+        }
+    }
+    return tradematch::OrderType::Limit;
+}
+
+tradematch::TimeInForce time_in_force(const std::string& name) {
+    for (const auto tif : {tradematch::TimeInForce::Day,
+                           tradematch::TimeInForce::ImmediateOrCancel,
+                           tradematch::TimeInForce::FillOrKill}) {
+        if (name == tradematch::to_string(tif)) {
+            return tif;
+        }
+    }
+    return tradematch::TimeInForce::GoodTillCancel;
+}
 
 void number_or_null(std::ostringstream& json, std::optional<double> value) {
     if (value) {
@@ -122,8 +161,172 @@ public:
                 }
                 instrument.crosses.back().volume += trade.quantity;
             }
-            print(instrument, trade, now);
+            // Both sides can be the visitor's in an auction, where orders trade at one price however they arrived.
+            const bool bought = fill(trade, Side::Buy, symbol, now);
+            const bool sold = fill(trade, Side::Sell, symbol, now);
+            print(instrument, trade, now, bought ? 'B' : (sold ? 'S' : 0));
         }
+    }
+
+    // Sends the visitor's order, given as a JavaScript object {side: 'BUY' or 'SELL', type: 'LIMIT', 'MARKET', 'STOP',
+    // or 'STOP_LIMIT', quantity, price, stop, tif: 'GTC', 'DAY', 'IOC', or 'FOK', postOnly, display} with prices in
+    // ticks, and reports the outcome as JSON. Self-trade prevention cancels the visitor's older order.
+    std::string submit(int symbol_index, const emscripten::val& request) {
+        const std::size_t index = index_of(symbol_index);
+        tradematch::OrderRequest order;
+        order.side = request["side"].isString() && request["side"].as<std::string>() == "SELL" ? Side::Sell : Side::Buy;
+        order.type = order_type(request["type"].isString() ? request["type"].as<std::string>() : "");
+        order.quantity = whole<tradematch::Quantity>(request["quantity"]);
+        order.price = whole<tradematch::Price>(request["price"]);
+        order.stop_price = whole<tradematch::Price>(request["stop"]);
+        order.time_in_force = time_in_force(request["tif"].isString() ? request["tif"].as<std::string>() : "");
+        order.post_only = request["postOnly"].isTrue();
+        order.display_quantity = whole<tradematch::Quantity>(request["display"]);
+        order.owner = simulator_->participant_owner();
+        order.self_trade_prevention = tradematch::SelfTradePrevention::CancelOldest;
+
+        // Registered before it is sent, so that the events of its own request already count its fills.
+        const tradematch::OrderId id = simulator_->next_order_id();
+        orders_[id] = VisitorOrder{id,
+                                   index,
+                                   order.side,
+                                   order.type,
+                                   order.time_in_force,
+                                   order.quantity,
+                                   order.price,
+                                   order.stop_price,
+                                   order.display_quantity,
+                                   simulator_->now(),
+                                   0};
+        const tradematch::SubmitResult result = simulator_->submit(index, order);
+        for (const tradematch::OrderId cancelled : result.self_trade_cancels) {
+            finish(cancelled, "self-trade prevention");
+        }
+        if (!result.accepted) {
+            orders_.erase(id);
+        }
+        std::ostringstream json;
+        json << "{\"accepted\":" << (result.accepted ? "true" : "false") << ",\"id\":" << id << ",\"reject\":\""
+             << tradematch::to_string(result.reject_reason) << "\",\"message\":\"" << result.message
+             << "\",\"filled\":" << result.filled_quantity << ",\"remaining\":" << result.remaining_quantity
+             << ",\"rested\":" << (result.rested ? "true" : "false")
+             << ",\"pending\":" << (result.pending_trigger ? "true" : "false")
+             << ",\"queued\":" << (result.queued_for_auction ? "true" : "false") << '}';
+        return json.str();
+    }
+
+    // Cancels one of the visitor's orders; any other ID is refused.
+    std::string cancel(double order_id) {
+        const auto found = orders_.find(order_id >= 0.0 ? static_cast<tradematch::OrderId>(order_id) : 0);
+        if (found == orders_.end()) {
+            return R"({"cancelled":false,"message":"no working order of yours has this ID"})";
+        }
+        const tradematch::CancelResult result = simulator_->cancel(found->second.symbol, found->first);
+        if (result.cancelled) {
+            finish(result.order_id, "cancelled");
+        }
+        std::ostringstream json;
+        json << "{\"cancelled\":" << (result.cancelled ? "true" : "false")
+             << ",\"quantity\":" << result.cancelled_quantity << ",\"message\":\"" << result.message << "\"}";
+        return json.str();
+    }
+
+    // Cancels every working order of the visitor's, and returns how many.
+    int cancel_all() {
+        std::vector<std::pair<std::size_t, tradematch::OrderId>> working;
+        working.reserve(orders_.size());
+        for (const auto& [id, order] : orders_) {
+            working.emplace_back(order.symbol, id);
+        }
+        int cancelled = 0;
+        for (const auto& [symbol, id] : working) {
+            if (simulator_->cancel(symbol, id).cancelled) {
+                finish(id, "cancelled");
+                ++cancelled;
+            }
+        }
+        return cancelled;
+    }
+
+    // Moves a resting limit order of the visitor's to a new price and quantity: a smaller quantity at the same price
+    // keeps its place in the queue.
+    std::string amend(double order_id, double price, double quantity) {
+        const auto found = orders_.find(order_id >= 0.0 ? static_cast<tradematch::OrderId>(order_id) : 0);
+        if (found == orders_.end() || found->second.type != tradematch::OrderType::Limit) {
+            return R"({"replaced":false,"message":"no resting limit order of yours has this ID"})";
+        }
+        VisitorOrder& order = found->second;
+        tradematch::OrderRequest replacement{order.id,
+                                             order.side,
+                                             tradematch::OrderType::Limit,
+                                             whole<tradematch::Quantity>(emscripten::val(quantity)),
+                                             whole<tradematch::Price>(emscripten::val(price)),
+                                             order.time_in_force};
+        replacement.display_quantity = order.display;
+        replacement.owner = simulator_->participant_owner();
+        replacement.self_trade_prevention = tradematch::SelfTradePrevention::CancelOldest;
+        // The replacement's quantity is what stays open, on top of what has filled so far; its own request may fill
+        // more, which the order events count.
+        const tradematch::Quantity filled_before = order.filled;
+        const tradematch::ReplaceResult result = simulator_->replace(order.symbol, replacement);
+        if (result.replaced) {
+            order.price = replacement.price;
+            order.quantity = filled_before + replacement.quantity;
+        }
+        std::ostringstream json;
+        json << "{\"replaced\":" << (result.replaced ? "true" : "false")
+             << ",\"kept_priority\":" << (result.priority_kept ? "true" : "false") << ",\"message\":\""
+             << result.message << "\"}";
+        return json.str();
+    }
+
+    // The visitor's working orders, and the fills and finished orders since the last call, as JSON.
+    std::string account() {
+        std::vector<std::pair<tradematch::OrderId, const char*>> gone;
+        std::ostringstream json;
+        json << "{\"owner\":" << simulator_->participant_owner() << ",\"orders\":[";
+        bool first = true;
+        for (const auto& [id, order] : orders_) {
+            const tradematch::OrderBook& book = simulator_->engine().book(simulator_->symbol(order.symbol));
+            const auto resting = book.get_order(id);
+            const char* status = resting                             ? "resting"
+                                 : book.has_stop_order(id)           ? "stop"
+                                 : book.has_auction_market_order(id) ? "queued"
+                                                                     : nullptr;
+            if (status == nullptr) {
+                gone.emplace_back(id, order.filled >= order.quantity ? "filled" : "expired");
+                continue;
+            }
+            const tradematch::Quantity remaining =
+                resting ? resting->remaining_quantity : order.quantity - std::min(order.filled, order.quantity);
+            json << (first ? "" : ",") << '[' << id << ',' << order.symbol << ",\"" << tradematch::to_string(order.side)
+                 << "\",\"" << tradematch::to_string(order.type) << "\",\""
+                 << tradematch::to_string(order.time_in_force) << "\"," << order.quantity << ',' << order.price << ','
+                 << order.stop << ',' << order.display << ',' << order.filled << ',' << remaining << ",\"" << status
+                 << "\"," << order.time << ']';
+            first = false;
+        }
+        for (const auto& [id, reason] : gone) {
+            finish(id, reason);
+        }
+        json << "],\"fills\":[";
+        for (std::size_t position = 0; position < fills_.size(); ++position) {
+            const VisitorFill& fill = fills_[position];
+            json << (position == 0 ? "" : ",") << '[' << fill.id << ',' << fill.time << ',' << fill.symbol << ','
+                 << fill.order << ",\"" << tradematch::to_string(fill.side) << "\"," << fill.price << ','
+                 << fill.quantity << ",\"" << fill.liquidity << "\"]";
+        }
+        json << "],\"done\":[";
+        for (std::size_t position = 0; position < done_.size(); ++position) {
+            const Finished& order = done_[position];
+            json << (position == 0 ? "" : ",") << '[' << order.id << ',' << order.symbol << ",\""
+                 << tradematch::to_string(order.side) << "\"," << order.quantity << ',' << order.filled << ",\""
+                 << order.reason << "\"]";
+        }
+        json << "]}";
+        fills_.clear();
+        done_.clear();
+        return json.str();
     }
 
     // The shape of the simulated day, as JSON.
@@ -182,15 +385,17 @@ public:
         json << ",\"asks\":";
         levels(json, feed.depth(symbol).levels(tradematch::Side::Sell, rows));
 
-        // The newest prints last, as [id, time, price, quantity, aggressor, fills]: 'B' or 'S' for the side that took
-        // liquidity, or 'X' for an auction's uncross, one print however many orders it filled.
+        // The newest prints last, as [id, time, price, quantity, aggressor, fills, mine]: the aggressor is 'B' or 'S'
+        // for the side that took liquidity, or 'X' for an auction's uncross, one print however many orders it filled;
+        // mine is 'B' or 'S' when the visitor bought or sold in it.
         const auto& tape = instrument.tape;
         json << ",\"trades\":[";
         const std::size_t first_print = tape.size() > kTapeSent ? tape.size() - kTapeSent : 0;
         for (std::size_t position = first_print; position < tape.size(); ++position) {
             const Print& entry = tape[position];
             json << (position == first_print ? "" : ",") << '[' << entry.id << ',' << entry.time << ',' << entry.price
-                 << ',' << entry.quantity << ",\"" << entry.aggressor << "\"," << entry.fills << ']';
+                 << ',' << entry.quantity << ",\"" << entry.aggressor << "\"," << entry.fills << ",\""
+                 << (entry.mine == 0 ? "" : std::string(1, entry.mine)) << "\"]";
         }
 
         // Every auction cross, as [time, price, volume].
@@ -272,6 +477,38 @@ private:
         tradematch::Volume quantity{};
         char aggressor{};
         std::uint32_t fills{};
+        char mine{};  // 'B' or 'S' if the visitor bought or sold in the print
+    };
+    struct VisitorOrder {
+        tradematch::OrderId id{};
+        std::size_t symbol{};
+        Side side{Side::Buy};
+        tradematch::OrderType type{tradematch::OrderType::Limit};
+        tradematch::TimeInForce time_in_force{tradematch::TimeInForce::GoodTillCancel};
+        tradematch::Quantity quantity{};
+        tradematch::Price price{};
+        tradematch::Price stop{};
+        tradematch::Quantity display{};
+        tradematch::Timestamp time{};
+        tradematch::Quantity filled{};
+    };
+    struct VisitorFill {
+        std::uint64_t id{};
+        tradematch::Timestamp time{};
+        std::size_t symbol{};
+        tradematch::OrderId order{};
+        Side side{Side::Buy};
+        tradematch::Price price{};
+        tradematch::Quantity quantity{};
+        char liquidity{};  // 'M' made liquidity, 'T' took it, 'A' traded in an auction's uncross
+    };
+    struct Finished {
+        tradematch::OrderId id{};
+        std::size_t symbol{};
+        Side side{Side::Buy};
+        tradematch::Quantity quantity{};
+        tradematch::Quantity filled{};
+        const char* reason{};
     };
     struct Instrument {
         double day_value{0.0};
@@ -284,15 +521,16 @@ private:
     };
 
     // Adds a trade to its symbol's tape. The fills of one uncross, all at one time and price, become one print.
-    void print(Instrument& instrument, const tradematch::Trade& trade, tradematch::Timestamp now) {
+    void print(Instrument& instrument, const tradematch::Trade& trade, tradematch::Timestamp now, char mine) {
         if (trade.auction && !instrument.tape.empty() && instrument.tape.back().aggressor == 'X' &&
             instrument.tape.back().time == now && instrument.tape.back().price == trade.price) {
             instrument.tape.back().quantity += trade.quantity;
             ++instrument.tape.back().fills;
+            instrument.tape.back().mine = mine != 0 ? mine : instrument.tape.back().mine;
             return;
         }
-        const char aggressor = trade.auction ? 'X' : (trade.aggressor_side == tradematch::Side::Buy ? 'B' : 'S');
-        instrument.tape.push_back(Print{++prints_, now, trade.price, trade.quantity, aggressor, 1});
+        const char aggressor = trade.auction ? 'X' : (trade.aggressor_side == Side::Buy ? 'B' : 'S');
+        instrument.tape.push_back(Print{++prints_, now, trade.price, trade.quantity, aggressor, 1, mine});
         if (instrument.tape.size() > kTape) {
             instrument.tape.pop_front();
         }
@@ -307,6 +545,39 @@ private:
         return std::round(instrument.day_value / static_cast<double>(instrument.day_volume) * 100.0) / 100.0;
     }
 
+    // Records a trade's fill of one of the visitor's orders on `side`; returns whether there was one.
+    bool fill(const tradematch::Trade& trade, Side side, tradematch::SymbolId symbol, tradematch::Timestamp now) {
+        const auto found = orders_.find(side == Side::Buy ? trade.buy_order_id : trade.sell_order_id);
+        if (found == orders_.end()) {
+            return false;
+        }
+        found->second.filled += trade.quantity;
+        const char liquidity = trade.auction ? 'A' : (trade.aggressor_side == side ? 'T' : 'M');
+        fills_.push_back(VisitorFill{++fill_count_,
+                                     now,
+                                     index_by_symbol_.at(symbol),
+                                     found->first,
+                                     side,
+                                     trade.price,
+                                     trade.quantity,
+                                     liquidity});
+        return true;
+    }
+
+    // Moves one of the visitor's orders from the working ones to the finished ones.
+    void finish(tradematch::OrderId id, const char* reason) {
+        const auto found = orders_.find(id);
+        if (found != orders_.end()) {
+            const VisitorOrder& order = found->second;
+            done_.push_back(Finished{id, order.symbol, order.side, order.quantity, order.filled, reason});
+            orders_.erase(found);
+        }
+    }
+
+    std::size_t index_of(int symbol_index) const {
+        return std::min(static_cast<std::size_t>(std::max(symbol_index, 0)), simulator_->symbol_count() - 1);
+    }
+
     tradematch::SimulationConfig config_;
     std::unique_ptr<tradematch::MarketSimulator> simulator_;
     std::vector<Instrument> instruments_;
@@ -314,6 +585,10 @@ private:
     int day_{0};
     tradematch::Timestamp seconds_sampled_{0};
     std::uint64_t prints_{0};
+    std::unordered_map<tradematch::OrderId, VisitorOrder> orders_;  // the visitor's working orders
+    std::vector<VisitorFill> fills_;                                // their fills since the last account()
+    std::vector<Finished> done_;                                    // orders finished since then
+    std::uint64_t fill_count_{0};
 };
 
 // The interactive command line: one interpreter that keeps its state from command to command.
@@ -348,7 +623,12 @@ EMSCRIPTEN_BINDINGS(tradematch) {
         .constructor<unsigned>()
         .function("step", &LiveMarket::step)
         .function("config", &LiveMarket::config)
-        .function("snapshot", &LiveMarket::snapshot);
+        .function("snapshot", &LiveMarket::snapshot)
+        .function("submit", &LiveMarket::submit)
+        .function("cancel", &LiveMarket::cancel)
+        .function("cancelAll", &LiveMarket::cancel_all)
+        .function("amend", &LiveMarket::amend)
+        .function("account", &LiveMarket::account);
     emscripten::class_<Terminal>("Terminal").constructor<>().function("run", &Terminal::run);
     // The same transcript the native command line produces for a script, so the golden scenarios can be checked
     // against the WebAssembly build too.

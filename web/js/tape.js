@@ -26,7 +26,8 @@ export class TapeView {
     const big = Math.max(1_000, 4 * (sizes[sizes.length >> 1] ?? 0));
     const largest = Math.max(1, ...sizes);
     const fresh = prints.filter((print) => this.newest === null || print[0] > this.newest).slice(-capacity);
-    const animate = this.newest !== null;
+    // A few new prints arrive with a tint; a burst of them, as at high speed, would only tint the whole tape.
+    const animate = this.newest !== null && fresh.length <= 3;
     for (const print of fresh) {
       this.list.prepend(this.row(print, daySeconds, big, largest, animate));
     }
@@ -44,8 +45,8 @@ export class TapeView {
     text(this.rate, count === 0 ? 'Quiet' : `${count}${covered ? '' : '+'} trades/s`);
   }
 
-  row([id, time, tradePrice, size, aggressor, fills], daySeconds, big, largest, animate) {
-    const row = element('li', `print ${aggressor}${animate ? ' new' : ''}`);
+  row([id, time, tradePrice, size, aggressor, fills, mine], daySeconds, big, largest, animate) {
+    const row = element('li', `print ${aggressor}${animate ? ' new' : ''}${mine ? ' mine' : ''}`);
     row.dataset.id = id;
     if (aggressor === 'X') {
       row.title = `Auction uncross at ${clock(time, daySeconds, 2)}: ${grouped(fills)} fills at one price`;
@@ -57,7 +58,8 @@ export class TapeView {
       row.classList.add('big');
       row.style.setProperty('--share', String(Math.min(1, size / largest)));
     }
-    row.title = `${aggressor === 'B' ? 'A buyer' : 'A seller'} took ${grouped(size)} at ${price(tradePrice)}`;
+    row.title = `${aggressor === 'B' ? 'A buyer' : 'A seller'} took ${grouped(size)} at ${price(tradePrice)}${
+      mine ? `: you ${mine === 'B' ? 'bought' : 'sold'}` : ''}`;
     row.innerHTML = `<span class="time">${clock(time, daySeconds, 2)}</span><span class="px">${price(tradePrice)}</span>` +
       `<span class="size">${grouped(size)}</span>`;
     return row;

@@ -169,6 +169,41 @@ await check('the order book groups prices and reads out a sweep', async () => {
   return `${prices.length} rows of 0.10`;
 });
 
+await check('a visitor trades against the agents', async () => {
+  // Paused, the agents can't fill or trade around the visitor's orders between one step of the check and the next.
+  await page.click('#play');
+  try {
+    // A bid picked from the book rests, and shows in the open orders, the book, and on the chart.
+    await page.click('.level.bid:nth-child(3)');
+    await page.click('#submit');
+    await sleep(200);
+    expect((await read('[data-count="open"]')) === '1', 'the resting bid should be an open order');
+    expect(await page.$('.level.bid.mine') !== null, 'the book should mark the bid');
+    // A market order takes the offers at once, and its fills build a position.
+    await page.click('[data-type="MARKET"]');
+    await page.click('[data-shares="1000"]');
+    await page.click('#submit');
+    await sleep(300);
+    const fills = Number(await read('[data-count="fills"]'));
+    expect(fills > 0, 'taking the offers should fill');
+    await page.click('.tab[data-tab="positions"]');
+    await sleep(150);
+    const position = await read('.account-table');
+    expect(position.includes('+1,000'), `the position: ${position.replace(/\s+/g, ' ').slice(0, 120)}`);
+    // Cancel all leaves nothing working.
+    await page.click('.tab[data-tab="open"]');
+    await sleep(150);
+    expect((await read('[data-count="open"]')) === '1', 'the bid should still be working');
+    await page.click('[data-action="cancel-all"]');
+    await sleep(200);
+    expect((await read('[data-count="open"]')) === '0', 'cancel all should cancel the bid');
+    return `${fills} fills`;
+  } finally {
+    await page.click('[data-type="LIMIT"]');
+    await page.click('#play');
+  }
+});
+
 await check('the market runs, and pausing stops it', async () => {
   const before = await read('#clock');
   await sleep(500);

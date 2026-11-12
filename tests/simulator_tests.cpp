@@ -166,6 +166,98 @@ void test_agents_exercise_the_engine() {
     expect(last > fair - 200.0 && last < fair + 200.0, "Prices should track fair value.");
 }
 
+bool throws(const std::function<void()>& action) {
+    try {
+        action();
+    } catch (const std::exception&) {
+        return true;
+    }
+    return false;
+}
+
+void test_outside_orders_trade_with_the_agents() {
+    using tradematch::OrderType;
+    using tradematch::Side;
+    using tradematch::TimeInForce;
+    tradematch::MarketSimulator sim(short_day(9));
+    sim.run_for(6 * kSecond);
+    expect(sim.session() == tradematch::SessionPhase::Continuous, "The test should start in continuous trading.");
+    const tradematch::OrderBook& book = sim.engine().book(sim.symbol(0));
+    const auto best_ask = book.best_ask();
+    const auto best_bid = book.best_bid();
+    if (!best_ask || !best_bid) {
+        throw TestFailure("The agents should have quoted both sides.");
+    }
+
+    // A marketable order takes the agents' offers, under an ID of the simulator's.
+    const std::uint64_t requests = sim.stats().requests;
+    const tradematch::OrderId next = sim.next_order_id();
+    tradematch::OrderRequest take{0, Side::Buy, OrderType::Limit, 500, *best_ask + 5, TimeInForce::ImmediateOrCancel};
+    take.owner = sim.participant_owner();
+    const auto taken = sim.submit(0, take);
+    expect(taken.accepted && taken.order_id == next && taken.filled_quantity > 0U,
+           "The order should trade, under the ID the simulator said it would take.");
+    for (const auto& trade : taken.trades) {
+        expect(trade.buy_order_id == taken.order_id && trade.sell_order_id != taken.order_id &&
+                   trade.aggressor_side == Side::Buy,
+               "Each trade should be against an agent's offer, with the outside order as the aggressor.");
+    }
+    expect(sim.stats().requests == requests + 1, "The request should count in the stats.");
+
+    // A passive order rests, keeps its place in the queue when reduced, and can be cancelled.
+    tradematch::OrderRequest rest{0, Side::Buy, OrderType::Limit, 300, *best_bid - 30, TimeInForce::GoodTillCancel};
+    rest.owner = sim.participant_owner();
+    const auto rested = sim.submit(0, rest);
+    expect(rested.rested && book.has_order(rested.order_id) && rested.order_id > taken.order_id,
+           "A passive outside order should rest under a new ID.");
+    rest.order_id = rested.order_id;
+    rest.quantity = 200;
+    const auto reduced = sim.replace(0, rest);
+    expect(reduced.replaced && reduced.priority_kept, "Reducing an outside order should keep its place.");
+
+    // The agents' orders are out of reach, and the agents' owner IDs can't be borrowed.
+    const auto agent_order = book.snapshot().asks.front().order_ids.front();
+    expect(!sim.cancel(0, agent_order).cancelled && book.has_order(agent_order),
+           "An outside cancel shouldn't reach an agent's order.");
+    auto borrowed = rest;
+    borrowed.order_id = agent_order;
+    expect(!sim.replace(0, borrowed).replaced, "An outside replace shouldn't reach an agent's order.");
+    auto impostor = take;
+    impostor.owner = 1;
+    expect(throws([&] { sim.submit(0, impostor); }), "An agent's owner ID should be refused.");
+    expect(throws([&] { sim.submit(sim.symbol_count(), take); }), "An unknown symbol should be refused.");
+    expect(sim.cancel(0, rested.order_id).cancelled && !book.has_order(rested.order_id),
+           "An outside order should be cancellable.");
+
+    // A bid joining the best price is filled by the agents' selling in time.
+    const auto bid = book.best_bid();
+    if (!bid) {
+        throw TestFailure("The agents should still be bidding.");
+    }
+    tradematch::OrderRequest join{0, Side::Buy, OrderType::Limit, 100, *bid, TimeInForce::GoodTillCancel};
+    join.owner = sim.participant_owner();
+    const auto joined = sim.submit(0, join);
+    for (int second = 0; second < 15 && book.has_order(joined.order_id); ++second) {
+        sim.run_for(kSecond);
+    }
+    expect(!book.has_order(joined.order_id), "A bid at the best price should trade with the agents' selling.");
+
+    // In a call auction, a market order waits for the uncross, then trades at its price.
+    while (sim.session() != tradematch::SessionPhase::ClosingAuction) {
+        sim.step();
+    }
+    const tradematch::OrderRequest market{0, Side::Sell, OrderType::Market, 100, 0, TimeInForce::Day};
+    auto queued = market;
+    queued.owner = sim.participant_owner();
+    const auto waiting = sim.submit(0, queued);
+    expect(waiting.queued_for_auction && book.has_auction_market_order(waiting.order_id),
+           "A market order should wait for the uncross.");
+    while (sim.session() == tradematch::SessionPhase::ClosingAuction) {
+        sim.step();
+    }
+    expect(!book.has_auction_market_order(waiting.order_id), "The uncross should take the market order.");
+}
+
 struct TestCase {
     const char* name;
     std::function<void()> run;
@@ -178,6 +270,7 @@ int run_all_tests() {
         {"session_names", test_session_names},
         {"sessions_cycle_through_auctions", test_sessions_cycle_through_auctions},
         {"agents_exercise_the_engine", test_agents_exercise_the_engine},
+        {"outside_orders_trade_with_the_agents", test_outside_orders_trade_with_the_agents},
     };
 
     std::size_t failures = 0;

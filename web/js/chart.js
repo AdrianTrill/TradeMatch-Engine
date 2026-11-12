@@ -1,6 +1,7 @@
 // The price chart: candles at a chosen timeframe on a time axis, with volume, the hidden fair value, the day's VWAP,
 // each day's auctions and close shaded, the auction crosses marked, and a crosshair. The wheel zooms, dragging
-// scrolls back in time, and a double click returns to the live edge.
+// scrolls back in time, and a double click returns to the live edge. The visitor's working orders are lines whose
+// labels drag to move them and cancel with their ×, fills are triangles, and a position's average price is a line.
 import { crisp, font, niceStep, surface, tag } from './canvas.js';
 import { text } from './dom.js';
 import { clock, compact, grouped, price } from './format.js';
@@ -13,6 +14,7 @@ const TOP = 66;  // room above the candles for the legend
 const RIGHT_PAD = 3;  // empty slots to the right of the live candle
 const ZOOM = { min: 20, max: 480, initial: 96 };
 const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1_800, 3_600, 7_200, 14_400];
+const ORDER_TYPES = { LIMIT: 'LMT', MARKET: 'MKT', STOP: 'STP', STOP_LIMIT: 'STP LMT' };
 
 export const TIMEFRAMES = [1, 5, 15, 60];
 
@@ -30,6 +32,10 @@ export class PriceChart {
     this.show = { fair: true, vwap: true };
     this.layout = null;
     this.fit = true;  // fit the zoom to the data on the next draw
+    this.orderBoxes = [];  // the order labels drawn last, for the pointer
+    this.orderDrag = null;  // an order being dragged to a new price
+    this.pressed = null;  // the order whose × is pressed
+    this.handlers = { cancel: () => {}, move: () => {} };
     this.listen();
     liveButton.addEventListener('click', () => this.goLive());
     for (const button of legend.querySelectorAll('[data-series]')) {
@@ -38,6 +44,11 @@ export class PriceChart {
         button.setAttribute('aria-pressed', String(this.show[button.dataset.series]));
       });
     }
+  }
+
+  // What to do when the visitor cancels an order on the chart, or drags it to a new price.
+  onOrders(handlers) {
+    this.handlers = handlers;
   }
 
   setTimeframe(seconds) {
@@ -63,8 +74,18 @@ export class PriceChart {
       const box = canvas.getBoundingClientRect();
       return { x: event.clientX - box.left, y: event.clientY - box.top };
     };
+    const orderAt = (point) => this.orderBoxes.find((box) =>
+      point.x >= box.left && point.x <= box.right && point.y >= box.top && point.y <= box.bottom);
     canvas.addEventListener('pointermove', (event) => {
       this.hover = position(event);
+      if (this.orderDrag && this.layout) {
+        this.orderDrag.target = Math.max(1, Math.round(this.layout.priceAt(this.hover.y)));
+        return;
+      }
+      if (!this.drag) {
+        const box = orderAt(this.hover);
+        canvas.style.cursor = !box ? '' : box.kind === 'cancel' ? 'pointer' : box.draggable ? 'ns-resize' : 'default';
+      }
       if (this.drag && this.layout) {
         const slots = (this.drag.x - this.hover.x) / this.layout.slotWidth;
         this.anchor = Math.min(this.layout.liveSlot, Math.round(this.drag.anchor + slots));
@@ -81,10 +102,30 @@ export class PriceChart {
         return;
       }
       canvas.setPointerCapture(event.pointerId);
+      const box = orderAt(position(event));
+      if (box?.kind === 'cancel') {
+        this.pressed = box.id;
+        return;
+      }
+      if (box?.draggable) {
+        this.orderDrag = { id: box.id, price: box.price, target: box.price, remaining: box.remaining };
+        return;
+      }
       this.drag = { x: position(event).x, anchor: this.anchor ?? this.layout.liveSlot };
       canvas.classList.add('dragging');
     });
-    const release = () => {
+    const release = (event) => {
+      if (this.pressed !== null && event.type === 'pointerup') {
+        const box = orderAt(position(event));
+        if (box?.kind === 'cancel' && box.id === this.pressed) {
+          this.handlers.cancel(box.id);
+        }
+      }
+      if (this.orderDrag && event.type === 'pointerup' && this.orderDrag.target !== this.orderDrag.price) {
+        this.handlers.move(this.orderDrag.id, this.orderDrag.target, this.orderDrag.remaining);
+      }
+      this.pressed = null;
+      this.orderDrag = null;
       this.drag = null;
       canvas.classList.remove('dragging');
     };
@@ -109,8 +150,9 @@ export class PriceChart {
     }, { passive: false });
   }
 
-  draw({ view, history, config }) {
+  draw({ view, history, config, overlay }) {
     const { context, width, height } = surface(this.canvas);
+    this.orderBoxes = [];
     const timeframe = this.timeframe;
     const length = timeframe * 1e9;
     const bars = history.bars(timeframe);
@@ -130,7 +172,7 @@ export class PriceChart {
     const slotWidth = plot / (this.visible + RIGHT_PAD);
     const xOfSlot = (slot) => (slot - firstSlot + 0.5) * slotWidth;
     const xOfTime = (time) => (time / length - firstSlot) * slotWidth;
-    this.layout = { plot, firstSlot, slotWidth, liveSlot };
+    this.layout = { plot, firstSlot, slotWidth, liveSlot, priceAt: () => 0 };
     this.liveButton.hidden = this.anchor === null;
 
     const first = lowerBound(bars, firstSlot * length);
@@ -171,6 +213,7 @@ export class PriceChart {
     const range = this.range;
     const y = (value) => TOP + ((range.high - value) / (range.high - range.low)) * (priceBottom - TOP);
     const priceAt = (pixel) => range.high - ((pixel - TOP) / (priceBottom - TOP)) * (range.high - range.low);
+    this.layout.priceAt = priceAt;
 
     // Grid lines at round prices.
     const step = Math.max(1, niceStep(range.high - range.low, Math.max(2, Math.floor((priceBottom - TOP) / 48))));
@@ -256,6 +299,9 @@ export class PriceChart {
       tags.push({ y: y(view.auction.price), text: price(view.auction.price), background: palette.auction,
         color: palette.surface });
     }
+    if (overlay) {
+      this.drawOverlay(context, overlay, firstSlot, lastSlot, length, xOfSlot, y, plot, priceBottom, tags);
+    }
     const hover = this.hover && !this.drag && this.hover.x < plot && this.hover.y < bottom ? this.hover : null;
     if (hover) {
       tags.push({ y: hover.y, text: price(Math.round(priceAt(hover.y))), background: palette.surfaceRaised,
@@ -312,6 +358,105 @@ export class PriceChart {
     // The legend follows the pointer, or else shows the newest bar in view, each against the bar before.
     const focus = hovered ?? (this.anchor === null ? bars.at(-1) : shown.at(-1));
     this.legendFor(view, focus ?? null, focus ? bars[lowerBound(bars, focus[0]) - 1] ?? null : null);
+  }
+
+  // The visitor's fills as triangles, the position's average price, and the working orders as lines with labels.
+  drawOverlay(context, overlay, firstSlot, lastSlot, length, xOfSlot, y, plot, priceBottom, tags) {
+    for (const [, time, , , side, fillPrice] of overlay.fills) {
+      const slot = Math.floor(time / length);
+      if (slot < firstSlot || slot > lastSlot) {
+        continue;
+      }
+      const x = xOfSlot(slot);
+      const tip = y(fillPrice);
+      const direction = side === 'BUY' ? 1 : -1;  // buys point up at their price from below, sells down from above
+      context.fillStyle = side === 'BUY' ? palette.buy : palette.sell;
+      context.strokeStyle = palette.surface;
+      context.lineWidth = 1.5;
+      context.beginPath();
+      context.moveTo(x, tip + 2 * direction);
+      context.lineTo(x + 5, tip + 10 * direction);
+      context.lineTo(x - 5, tip + 10 * direction);
+      context.closePath();
+      context.stroke();
+      context.fill();
+      context.lineWidth = 1;
+    }
+
+    if (overlay.position) {
+      const level = crisp(y(overlay.position.average));
+      context.setLineDash([1, 3]);
+      context.strokeStyle = palette.accent;
+      context.beginPath();
+      context.moveTo(0, level);
+      context.lineTo(plot, level);
+      context.stroke();
+      context.setLineDash([]);
+      tags.push({ y: y(overlay.position.average), text: (overlay.position.average / 100).toFixed(2),
+        background: palette.accent, color: '#fff' });
+    }
+
+    // Orders: a line at the price that matters (the limit, or for stops the trigger), and a label at the left.
+    const labels = [];
+    for (const [id, , side, type, , , limit, stop, , , remaining] of overlay.orders) {
+      if (type === 'MARKET') {
+        continue;  // queued for the uncross: no price of its own
+      }
+      const dragging = this.orderDrag?.id === id;
+      const orderPrice = type === 'LIMIT' ? limit : stop;
+      const shown = dragging ? this.orderDrag.target : orderPrice;
+      const color = side === 'BUY' ? palette.buy : palette.sell;
+      const level = crisp(y(shown));
+      if (level < TOP - 10 || level > priceBottom + 4) {
+        continue;
+      }
+      context.strokeStyle = color;
+      context.setLineDash(type === 'LIMIT' ? [6, 4] : [2, 3]);
+      context.beginPath();
+      context.moveTo(0, level);
+      context.lineTo(plot, level);
+      context.stroke();
+      context.setLineDash([]);
+      labels.push({ id, y: level, color, side, type, remaining, price: orderPrice, shown, dragging });
+      tags.push({ y: level, text: price(shown), background: color, color: side === 'BUY' ? '#03130c' : '#fff' });
+    }
+    labels.sort((a, b) => a.y - b.y);
+    let previous = -Infinity;
+    for (const label of labels) {
+      const top = Math.max(label.y - 10, previous + 3);
+      previous = top + 20;
+      const words = `${label.side === 'BUY' ? 'BUY' : 'SELL'} ${compact(label.remaining)} ${ORDER_TYPES[label.type]}${
+        label.dragging ? ` → ${price(label.shown)}` : ''}`;
+      context.font = font(10.5, 700);
+      const width = context.measureText(words).width + 16;
+      // An opaque label tinted with the order's color, over whatever the chart has there.
+      context.beginPath();
+      context.roundRect(8.5, top + 0.5, width + 21, 19, 5);
+      context.fillStyle = palette.surface;
+      context.fill();
+      context.fillStyle = label.color;
+      context.globalAlpha = 0.16;
+      context.fill();
+      context.globalAlpha = 1;
+      context.strokeStyle = label.color;
+      context.stroke();
+      context.fillStyle = label.color;
+      context.fillText(words, 16, top + 14);
+      // The ×, behind a divider, cancels the order.
+      context.strokeStyle = label.color;
+      context.globalAlpha = 0.5;
+      context.beginPath();
+      context.moveTo(crisp(8 + width), top + 4);
+      context.lineTo(crisp(8 + width), top + 16);
+      context.stroke();
+      context.globalAlpha = 1;
+      context.font = font(13, 600);
+      context.fillText('×', 8 + width + 7, top + 15);
+      this.orderBoxes.push(
+        { id: label.id, kind: 'drag', draggable: label.type === 'LIMIT', price: label.price, remaining: label.remaining,
+          left: 8, right: 8 + width, top, bottom: top + 20 },
+        { id: label.id, kind: 'cancel', left: 8 + width, right: 8 + width + 22, top, bottom: top + 20 });
+    }
   }
 
   // A series through the bars' centres, broken where `breaks` says so or where a value is missing.

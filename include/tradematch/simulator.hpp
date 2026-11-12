@@ -16,6 +16,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace tradematch {
@@ -101,6 +102,23 @@ public:
         engine_.set_order_listener(listener);
     }
 
+    // Orders from outside the simulation, such as a person trading in the browser playground, at the current
+    // simulated time. They meet the agents' orders like any other, are journaled like theirs, and count in the stats.
+    // Each new order takes the simulator's next order ID in place of order.order_id, and the result reports it. An
+    // outside order's owner must not be an agent's (participant_owner() is one no agent uses), and cancels and
+    // replaces reach only outside orders: any other ID is rejected as unknown.
+    SubmitResult submit(std::size_t symbol_index, OrderRequest order);
+    CancelResult cancel(std::size_t symbol_index, OrderId order_id);
+    ReplaceResult replace(std::size_t symbol_index, const OrderRequest& replacement);
+
+    OwnerId participant_owner() const noexcept;
+
+    // The ID the next order will take, whether an agent's or an outside one, so that a caller can recognize its own
+    // order in the events of the request that submits it.
+    OrderId next_order_id() const noexcept {
+        return next_order_id_;
+    }
+
     // Flushes the journal and writes a snapshot of the engine; see JournaledEngine::save_snapshot().
     std::uint64_t save_snapshot(const std::filesystem::path& path) {
         return journaled_.save_snapshot(path);
@@ -149,6 +167,8 @@ private:
     void trade_momentum(Agent& agent, std::size_t index);
     void trade_whale(Agent& agent, std::size_t index);
     void send(Agent& agent, std::size_t index, OrderRequest order);
+    SubmitResult place(std::size_t index, const OrderRequest& order);
+    void check_outside_owner(OwnerId owner) const;
     void cancel(Agent& agent, std::size_t index, OrderId order_id);
     void prune(Agent& agent);
     void record_latency(std::chrono::steady_clock::time_point start);
@@ -168,6 +188,7 @@ private:
     SessionPhase phase_{SessionPhase::Closed};
     Timestamp now_{0};
     Timestamp phase_end_{0};
+    std::unordered_set<OrderId> outside_orders_;
     OrderId next_order_id_{1};
     int day_{0};
 };
